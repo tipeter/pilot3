@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "esp-idf/esp_hal_ana_conv",
+		"source" : "/home/ptihanyi/esp32/esp-idf/components/esp_hal_ana_conv"
+	}
+}

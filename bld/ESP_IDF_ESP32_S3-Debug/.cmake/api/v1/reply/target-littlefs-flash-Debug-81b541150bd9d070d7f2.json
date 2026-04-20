@@ -1,0 +1,65 @@
+{
+	"backtrace" : 3,
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"add_custom_target",
+			"esptool_py_flash_target",
+			"littlefs_create_partition_image",
+			"add_dependencies"
+		],
+		"files" : 
+		[
+			"/home/ptihanyi/esp32/esp-idf/components/esptool_py/project_include.cmake",
+			"managed_components/joltwallet__littlefs/project_include.cmake",
+			"main/CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 2
+			},
+			{
+				"command" : 2,
+				"file" : 2,
+				"line" : 13,
+				"parent" : 0
+			},
+			{
+				"command" : 1,
+				"file" : 1,
+				"line" : 67,
+				"parent" : 1
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 192,
+				"parent" : 2
+			},
+			{
+				"command" : 3,
+				"file" : 1,
+				"line" : 70,
+				"parent" : 1
+			}
+		]
+	},
+	"dependencies" : 
+	[
+		{
+			"backtrace" : 4,
+			"id" : "littlefs_littlefs_bin::@7368607ed66887415643"
+		}
+	],
+	"id" : "littlefs-flash::@7368607ed66887415643",
+	"name" : "littlefs-flash",
+	"paths" : 
+	{
+		"build" : "esp-idf/main",
+		"source" : "main"
+	},
+	"sources" : [],
+	"type" : "UTILITY"
+}

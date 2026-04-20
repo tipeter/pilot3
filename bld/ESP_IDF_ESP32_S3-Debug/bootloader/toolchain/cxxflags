@@ -1,0 +1,6 @@
+"-specs=/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/bootloader/specs/picolibc.specs"
+-mlongcalls
+-fno-builtin-memcpy
+-fno-builtin-memset
+-fno-builtin-bzero
+-fno-rtti

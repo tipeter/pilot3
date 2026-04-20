@@ -72,53 +72,62 @@ static void event_handler(void *arg, esp_event_base_t base,
     /* IDF 6.0: event base is NETWORK_PROV_EVENT, types are NETWORK_PROV_*.
      * Most function names changed from wifi_prov_mgr_* to network_prov_mgr_*
      * with some exceptions documented in the migration guide. */
-    if (base == NETWORK_PROV_EVENT) {
-        switch (id) {
-            case NETWORK_PROV_START:
-                ESP_LOGI(TAG, "BLE provisioning started.");
-                break;
-            case NETWORK_PROV_CRED_RECV:
-                ESP_LOGI(TAG, "Wi-Fi credentials received via BLE.");
-                break;
-            case NETWORK_PROV_CRED_FAIL: {
-                network_prov_sta_fail_reason_t *reason =
-                    (network_prov_sta_fail_reason_t *)data;
-                ESP_LOGE(TAG, "Provisioning credential failure: %s",
-                         (*reason == NETWORK_PROV_STA_AUTH_ERROR)
-                             ? "Auth error" : "AP not found");
-                /* IDF 6.0 rename: wifi_prov_mgr_reset_sm_state_on_failure
-                 *              -> network_prov_mgr_reset_wifi_sm_state_on_failure */
-                network_prov_mgr_reset_wifi_sm_state_on_failure();
-                break;
-            }
-            case NETWORK_PROV_CRED_SUCCESS:
-                ESP_LOGI(TAG, "Provisioning successful.");
-                break;
-            case NETWORK_PROV_END:
-                network_prov_mgr_deinit();
-                free_srp_params();
-                ESP_LOGI(TAG, "Provisioning ended; BLE stack released.");
-                break;
-        }
-
-    } else if (base == WIFI_EVENT) {
-        if (id == WIFI_EVENT_STA_START) {
-            esp_wifi_connect();
-        } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
-            s_connected = false;
-            xEventGroupClearBits(s_wifi_eg, WIFI_CONNECTED_BIT);
-            ESP_LOGW(TAG, "Disconnected. Reconnecting...");
-            if (s_on_disconnect) s_on_disconnect();
-            esp_wifi_connect();
-        }
-
-    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
-        snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
-        s_connected = true;
-        xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
-        ESP_LOGI(TAG, "IP acquired: %s", s_ip_str);
-        if (s_on_connect) s_on_connect();
+    if (base == NETWORK_PROV_EVENT)
+    {
+      switch (id)
+      {
+      case NETWORK_PROV_START:
+        ESP_LOGI(TAG, "BLE provisioning started.");
+        break;
+      case NETWORK_PROV_WIFI_CRED_RECV: // ← javítva
+        ESP_LOGI(TAG, "Wi-Fi credentials received via BLE.");
+        break;
+      case NETWORK_PROV_WIFI_CRED_FAIL: {             // ← javítva
+        network_prov_wifi_sta_fail_reason_t *reason = // ← javítva
+            (network_prov_wifi_sta_fail_reason_t *) data;
+        ESP_LOGE(TAG,
+                 "Provisioning credential failure: %s",
+                 (*reason == NETWORK_PROV_WIFI_STA_AUTH_ERROR) // ← javítva
+                     ? "Auth error"
+                     : "AP not found");
+        network_prov_mgr_reset_wifi_sm_state_on_failure();
+        break;
+      }
+      case NETWORK_PROV_WIFI_CRED_SUCCESS: // ← javítva
+        ESP_LOGI(TAG, "Provisioning successful.");
+        break;
+      case NETWORK_PROV_END:
+        network_prov_mgr_deinit();
+        free_srp_params();
+        ESP_LOGI(TAG, "Provisioning ended; BLE stack released.");
+        break;
+      }
+    }
+    else if (base == WIFI_EVENT)
+    {
+      if (id == WIFI_EVENT_STA_START)
+      {
+        esp_wifi_connect();
+      }
+      else if (id == WIFI_EVENT_STA_DISCONNECTED)
+      {
+        s_connected = false;
+        xEventGroupClearBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+        ESP_LOGW(TAG, "Disconnected. Reconnecting...");
+        if (s_on_disconnect)
+          s_on_disconnect();
+        esp_wifi_connect();
+      }
+    }
+    else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP)
+    {
+      ip_event_got_ip_t *ev = (ip_event_got_ip_t *) data;
+      snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
+      s_connected = true;
+      xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+      ESP_LOGI(TAG, "IP acquired: %s", s_ip_str);
+      if (s_on_connect)
+        s_on_connect();
     }
 }
 
