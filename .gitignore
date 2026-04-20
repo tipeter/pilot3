@@ -1,0 +1,56 @@
+# ----------------------------------------------------------------------
+# ESP-IDF specifikus mappák és fájlok
+# ----------------------------------------------------------------------
+# A fordítási folyamat során generált összes fájl
+build/
+
+# Az ESP-IDF Component Manager által letöltött komponensek
+managed_components/
+
+# Biztonsági mentés az sdkconfig fájlról (automatikusan generálódik)
+sdkconfig.old
+
+# ----------------------------------------------------------------------
+# Python virtuális környezetek (ha a projekt mappájában tárolod)
+# ----------------------------------------------------------------------
+.env/
+env/
+venv/
+__pycache__/
+*.pyc
+
+# ----------------------------------------------------------------------
+# IDE és kódszerkesztő fájlok
+# ----------------------------------------------------------------------
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/c_cpp_properties.json
+
+# JetBrains / CLion
+.idea/
+cmake-build-*/
+
+# Vim
+*.swp
+*.swo
+
+# QTCreator
+.qtcreator/
+
+# ----------------------------------------------------------------------
+# Operációs rendszer specifikus fájlok
+# ----------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+

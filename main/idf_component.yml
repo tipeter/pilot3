@@ -1,0 +1,7 @@
+## IDF 6.0: wifi_provisioning removed -> network_provisioning managed component
+## cJSON removed -> espressif/cjson managed component
+dependencies:
+  idf: ">=6.0"
+  espressif/network_provisioning: "^1.1.0"
+  joltwallet/littlefs: "^1.14.8"
+  espressif/cjson: "^1.7.18"

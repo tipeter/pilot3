@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32-S3 Pilot Dashboard</title>
+<style>
+  :root {
+    --bg:      #0f1117;
+    --surface: #1a1d27;
+    --card:    #20232f;
+    --border:  #2e3244;
+    --accent:  #4f8ef7;
+    --accent2: #6ee7b7;
+    --danger:  #f87171;
+    --warn:    #fbbf24;
+    --text:    #e2e8f0;
+    --muted:   #64748b;
+    --mono:    'JetBrains Mono', 'Fira Code', monospace;
+    --radius:  10px;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+
+  /* ── Layout ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: .02em; }
+  header .status-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--muted); display: inline-block;
+    margin-right: 8px; transition: background .4s;
+  }
+  header .status-dot.ok  { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+  header .status-dot.err { background: var(--danger); }
+  header .right { display: flex; align-items: center; gap: 16px; }
+
+  #token-input-wrap {
+    display: flex; gap: 8px; align-items: center;
+  }
+  #token-input-wrap input {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 10px; color: var(--text);
+    font-size: 13px; width: 240px;
+  }
+  #token-input-wrap input:focus { outline: none; border-color: var(--accent); }
+
+  .main-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto;
+    gap: 20px;
+    padding: 24px;
+    flex: 1;
+  }
+  @media (max-width: 900px) {
+    .main-grid { grid-template-columns: 1fr; }
+  }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .card-title {
+    font-size: 12px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .card.span2 { grid-column: span 2; }
+  @media (max-width: 900px) { .card.span2 { grid-column: span 1; } }
+
+  /* ── System info grid ── */
+  .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 20px;
+  }
+  .info-item label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 2px; }
+  .info-item span  { font-size: 15px; font-weight: 500; }
+  .info-item .mono { font-family: var(--mono); font-size: 13px; }
+
+  /* ── Progress bar ── */
+  .progress-wrap { display: none; flex-direction: column; gap: 6px; }
+  .progress-wrap.visible { display: flex; }
+  .progress-bar-bg {
+    height: 8px; background: var(--border); border-radius: 4px; overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%; background: var(--accent); border-radius: 4px;
+    width: 0%; transition: width .3s ease;
+  }
+  .progress-label { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; }
+
+  /* ── Buttons ── */
+  .btn {
+    padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500;
+    cursor: pointer; border: none; transition: opacity .15s, transform .1s;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary  { background: var(--accent); color: #fff; }
+  .btn-danger   { background: var(--danger); color: #fff; }
+  .btn-ghost    { background: var(--border); color: var(--text); }
+  .btn-sm       { padding: 5px 10px; font-size: 12px; }
+
+  /* ── OTA drop zone ── */
+  #drop-zone {
+    border: 2px dashed var(--border); border-radius: var(--radius);
+    padding: 36px 20px; text-align: center; cursor: pointer;
+    transition: border-color .2s, background .2s; position: relative;
+  }
+  #drop-zone.drag { border-color: var(--accent); background: rgba(79,142,247,.06); }
+  #drop-zone.has-file { border-color: var(--accent2); background: rgba(110,231,183,.06); }
+  #drop-zone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  #drop-zone p   { color: var(--muted); font-size: 13px; pointer-events: none; }
+  #drop-zone strong { color: var(--text); }
+  #file-name { font-size: 12px; color: var(--accent2); margin-top: 4px; }
+
+  /* ── OTA status message ── */
+  #ota-status {
+    font-size: 13px; padding: 8px 12px; border-radius: 6px;
+    display: none; margin-top: 4px;
+  }
+  #ota-status.ok   { background: rgba(110,231,183,.12); color: var(--accent2); display: block; }
+  #ota-status.err  { background: rgba(248,113,113,.12); color: var(--danger);  display: block; }
+  #ota-status.info { background: rgba(79,142,247,.12);  color: var(--accent);  display: block; }
+
+  /* ── OTA version strip ── */
+  .ota-meta { display: flex; gap: 16px; flex-wrap: wrap; }
+  .ota-meta .chip {
+    font-size: 11px; padding: 3px 10px; border-radius: 20px;
+    background: var(--border); color: var(--muted); font-family: var(--mono);
+  }
+  .ota-meta .chip span { color: var(--text); }
+
+  /* ── Config editor ── */
+  #config-table { width: 100%; border-collapse: collapse; }
+  #config-table th, #config-table td {
+    text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  #config-table th { font-size: 11px; color: var(--muted); font-weight: 600; }
+  #config-table td input {
+    background: transparent; border: none; color: var(--text);
+    font-family: var(--mono); font-size: 13px; width: 100%;
+    padding: 2px 4px; border-radius: 4px;
+  }
+  #config-table td input:focus {
+    outline: none; background: var(--border);
+  }
+  #config-table tr:last-child td { border-bottom: none; }
+  .config-save-btn {
+    font-size: 11px; padding: 3px 8px; border-radius: 4px;
+    background: var(--accent); color: #fff; border: none; cursor: pointer;
+    display: none; margin-left: 6px;
+  }
+  #config-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 20px 0; }
+  .new-key-row { display: flex; gap: 8px; align-items: center; }
+  .new-key-row input {
+    background: var(--border); border: none; border-radius: 6px;
+    padding: 6px 10px; color: var(--text); font-size: 13px; flex: 1;
+  }
+  .new-key-row input:focus { outline: 1px solid var(--accent); }
+
+  /* ── Log console ── */
+  #log-console {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.6;
+    background: #0b0d14;
+    border-radius: 6px;
+    padding: 12px 14px;
+    height: 340px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  #log-console .l-I { color: #94a3b8; }
+  #log-console .l-W { color: var(--warn); }
+  #log-console .l-E { color: var(--danger); }
+  #log-console .l-D { color: #475569; }
+  .log-controls { display: flex; gap: 8px; align-items: center; }
+  #ws-status { font-size: 11px; color: var(--muted); }
+  #ws-status.connected { color: var(--accent2); }
+  .log-auto { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-left: auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="status-dot" id="conn-dot"></span>ESP32-S3 Pilot Dashboard</h1>
+  <div class="right">
+    <div id="token-input-wrap">
+      <input type="password" id="token-input" placeholder="API token" autocomplete="off">
+      <button class="btn btn-ghost btn-sm" onclick="saveToken()">Connect</button>
+    </div>
+  </div>
+</header>
+
+<div class="main-grid">
+
+  <!-- ── System Info ───────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-title">
+      System info
+      <button class="btn btn-ghost btn-sm" onclick="loadSystem()">Refresh</button>
+    </div>
+    <div class="info-grid" id="sys-grid">
+      <div class="info-item"><label>Firmware</label><span id="s-fw">—</span></div>
+      <div class="info-item"><label>IDF version</label><span id="s-idf">—</span></div>
+      <div class="info-item"><label>IP address</label><span class="mono" id="s-ip">—</span></div>
+      <div class="info-item"><label>Wi-Fi RSSI</label><span id="s-rssi">—</span></div>
+      <div class="info-item"><label>Uptime</label><span id="s-uptime">—</span></div>
+      <div class="info-item"><label>Free heap</label><span id="s-heap">—</span></div>
+      <div class="info-item"><label>Min heap</label><span id="s-mheap">—</span></div>
+      <div class="info-item"><label>Free PSRAM</label><span id="s-psram">—</span></div>
+    </div>
+  </div>
+
+  <!-- ── OTA Upload ────────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-title">OTA firmware update</div>
+
+    <div class="ota-meta" id="ota-meta"></div>
+
+    <div id="drop-zone">
+      <input type="file" id="fw-file" accept=".bin">
+      <p>Drag &amp; drop <strong>.bin</strong> file here<br>or click to browse</p>
+      <div id="file-name"></div>
+    </div>
+
+    <div class="progress-wrap" id="prog-wrap">
+      <div class="progress-bar-bg"><div class="progress-bar-fill" id="prog-fill"></div></div>
+      <div class="progress-label"><span id="prog-bytes">0 B</span><span id="prog-pct">0%</span></div>
+    </div>
+
+    <div id="ota-status"></div>
+
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      <button class="btn btn-primary" id="btn-upload" onclick="startOta()" disabled>Upload firmware</button>
+      <button class="btn btn-danger"  id="btn-rollback" onclick="rollback()">Rollback</button>
+    </div>
+  </div>
+
+  <!-- ── Config Editor ─────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-title">
+      Device configuration
+      <button class="btn btn-ghost btn-sm" onclick="loadConfig()">Refresh</button>
+    </div>
+    <div style="overflow-x:auto;">
+      <table id="config-table">
+        <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+        <tbody id="config-body"></tbody>
+      </table>
+      <div id="config-empty">Loading…</div>
+    </div>
+    <div class="new-key-row">
+      <input type="text"  id="new-key"   placeholder="key">
+      <input type="text"  id="new-val"   placeholder="value">
+      <button class="btn btn-primary btn-sm" onclick="addConfigEntry()">Add</button>
+    </div>
+  </div>
+
+  <!-- ── Log Console ───────────────────────────────────────────── -->
+  <div class="card span2">
+    <div class="card-title">
+      Live log stream
+      <div class="log-controls">
+        <span id="ws-status">Disconnected</span>
+        <button class="btn btn-ghost btn-sm" onclick="connectWs()">Connect WS</button>
+        <button class="btn btn-ghost btn-sm" onclick="clearLog()">Clear</button>
+        <label class="log-auto">
+          <input type="checkbox" id="chk-scroll" checked> Auto-scroll
+        </label>
+      </div>
+    </div>
+    <div id="log-console"></div>
+  </div>
+
+</div><!-- /main-grid -->
+
+<script>
+'use strict';
+
+/* ── State ── */
+let token = localStorage.getItem('pilot_token') || '';
+if (token) document.getElementById('token-input').value = token;
+
+let ws        = null;
+let wsRetry   = null;
+let logLines  = 0;
+const MAX_LOG = 500;
+
+/* ── Token ── */
+function saveToken() {
+  token = document.getElementById('token-input').value.trim();
+  localStorage.setItem('pilot_token', token);
+  setDot('ok');
+  loadAll();
+}
+
+/* ── Utilities ── */
+function setDot(state) {
+  const d = document.getElementById('conn-dot');
+  d.className = 'status-dot ' + (state || '');
+}
+
+function fmtBytes(b) {
+  if (b < 1024)       return b + ' B';
+  if (b < 1048576)    return (b/1024).toFixed(1) + ' KB';
+  return                     (b/1048576).toFixed(2) + ' MB';
+}
+
+function fmtUptime(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return `${h}h ${m}m ${sec}s`;
+}
+
+async function apiFetch(path, opts = {}) {
+  opts.headers = Object.assign({ 'Authorization': 'Bearer ' + token }, opts.headers || {});
+  const r = await fetch(path, opts);
+  if (r.status === 401) { setDot('err'); throw new Error('Unauthorized'); }
+  return r;
+}
+
+/* ── System info ── */
+async function loadSystem() {
+  try {
+    const r = await apiFetch('/api/v1/system');
+    const d = await r.json();
+    document.getElementById('s-fw').textContent    = d.fw_version   || '—';
+    document.getElementById('s-idf').textContent   = d.idf_version  || '—';
+    document.getElementById('s-ip').textContent    = d.ip           || '—';
+    document.getElementById('s-rssi').textContent  = d.rssi_dbm != null ? d.rssi_dbm + ' dBm' : '—';
+    document.getElementById('s-uptime').textContent= d.uptime_s != null ? fmtUptime(d.uptime_s) : '—';
+    document.getElementById('s-heap').textContent  = d.free_heap != null ? fmtBytes(d.free_heap) : '—';
+    document.getElementById('s-mheap').textContent = d.min_heap  != null ? fmtBytes(d.min_heap)  : '—';
+    document.getElementById('s-psram').textContent = d.free_psram!= null ? fmtBytes(d.free_psram): '—';
+    setDot('ok');
+  } catch (e) { setDot('err'); }
+}
+
+/* ── OTA status / meta ── */
+async function loadOtaStatus() {
+  try {
+    const r = await apiFetch('/api/v1/ota/status');
+    const d = await r.json();
+    const meta = document.getElementById('ota-meta');
+    const states = ['undefined','pending_verify','valid','invalid','aborted','new'];
+    meta.innerHTML =
+      `<span class="chip">v<span>${d.version||'?'}</span></span>` +
+      `<span class="chip">partition: <span>${d.partition||'?'}</span></span>` +
+      `<span class="chip">state: <span>${states[d.ota_state]||d.ota_state}</span></span>` +
+      `<span class="chip">built: <span>${d.date||'?'}</span></span>`;
+  } catch(_) {}
+}
+
+/* ── OTA upload ── */
+document.getElementById('fw-file').addEventListener('change', function() {
+  const f = this.files[0];
+  if (!f) return;
+  document.getElementById('file-name').textContent = f.name + ' (' + fmtBytes(f.size) + ')';
+  document.getElementById('drop-zone').classList.add('has-file');
+  document.getElementById('btn-upload').disabled = false;
+});
+
+const dz = document.getElementById('drop-zone');
+dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('drag'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+dz.addEventListener('drop', e => {
+  e.preventDefault(); dz.classList.remove('drag');
+  const f = e.dataTransfer.files[0];
+  if (!f || !f.name.endsWith('.bin')) return;
+  const dt = new DataTransfer(); dt.items.add(f);
+  document.getElementById('fw-file').files = dt.files;
+  document.getElementById('fw-file').dispatchEvent(new Event('change'));
+});
+
+function setOtaStatus(msg, type) {
+  const el = document.getElementById('ota-status');
+  el.textContent  = msg;
+  el.className    = type;
+}
+
+function setProg(rx, total) {
+  const pct = total > 0 ? Math.round(rx / total * 100) : 0;
+  document.getElementById('prog-fill').style.width    = pct + '%';
+  document.getElementById('prog-bytes').textContent   = fmtBytes(rx) + ' / ' + fmtBytes(total);
+  document.getElementById('prog-pct').textContent     = pct + '%';
+}
+
+async function startOta() {
+  const file = document.getElementById('fw-file').files[0];
+  if (!file) return;
+
+  const btn = document.getElementById('btn-upload');
+  btn.disabled = true;
+  document.getElementById('prog-wrap').classList.add('visible');
+  setProg(0, file.size);
+  setOtaStatus('Uploading firmware…', 'info');
+
+  try {
+    const r = await apiFetch('/api/v1/ota', {
+      method: 'POST',
+      headers: {
+        'Content-Type':   'application/octet-stream',
+        'Content-Length': file.size,
+      },
+      body: file,
+      duplex: 'half',
+    });
+    if (r.ok) {
+      setOtaStatus('Upload accepted. Device rebooting…', 'ok');
+      setProg(file.size, file.size);
+    } else {
+      const t = await r.text();
+      setOtaStatus('Error: ' + t, 'err');
+      btn.disabled = false;
+    }
+  } catch (e) {
+    setOtaStatus('Network error: ' + e.message, 'err');
+    btn.disabled = false;
+  }
+}
+
+async function rollback() {
+  if (!confirm('Roll back to the previous firmware and reboot?')) return;
+  try {
+    const r = await apiFetch('/api/v1/ota/rollback', { method: 'POST' });
+    const d = await r.json();
+    setOtaStatus(d.message || 'Rollback initiated.', r.ok ? 'ok' : 'err');
+  } catch (e) {
+    setOtaStatus('Rollback error: ' + e.message, 'err');
+  }
+}
+
+/* ── WebSocket log – update progress from WS messages too ── */
+function connectWs() {
+  if (ws && ws.readyState < 2) ws.close();
+  if (wsRetry) { clearTimeout(wsRetry); wsRetry = null; }
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url   = `${proto}://${location.host}/ws/log?token=${encodeURIComponent(token)}`;
+  ws = new WebSocket(url);
+
+  const statusEl = document.getElementById('ws-status');
+  ws.onopen  = () => { statusEl.textContent = 'Connected'; statusEl.className = 'connected'; };
+  ws.onclose = () => {
+    statusEl.textContent = 'Disconnected'; statusEl.className = '';
+    wsRetry = setTimeout(connectWs, 5000);
+  };
+  ws.onerror = () => {};
+
+  ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'log') {
+        appendLog(msg.msg);
+      } else if (msg.type === 'ota_progress') {
+        setProg(msg.bytes, msg.total);
+        document.getElementById('prog-wrap').classList.add('visible');
+      } else if (msg.type === 'ota_done') {
+        setOtaStatus('OTA complete – rebooting…', 'ok');
+      } else if (msg.type === 'ota_rollback') {
+        setOtaStatus('Rollback – rebooting…', 'info');
+      }
+    } catch (_) { appendLog(ev.data); }
+  };
+}
+
+function appendLog(line) {
+  const con  = document.getElementById('log-console');
+  const span = document.createElement('span');
+
+  /* Colour by ESP-IDF log level character: I, W, E, D */
+  const lvl  = line.match(/\b([IWED])\s*\(/)?.[1] || 'I';
+  span.className = 'l-' + lvl;
+  span.textContent = line + '\n';
+  con.appendChild(span);
+
+  /* Trim oldest lines to keep memory bounded. */
+  logLines++;
+  if (logLines > MAX_LOG) {
+    con.firstChild && con.removeChild(con.firstChild);
+    logLines--;
+  }
+
+  if (document.getElementById('chk-scroll').checked) {
+    con.scrollTop = con.scrollHeight;
+  }
+}
+
+function clearLog() {
+  document.getElementById('log-console').innerHTML = '';
+  logLines = 0;
+}
+
+/* ── Config editor ── */
+let configData = {};
+
+async function loadConfig() {
+  document.getElementById('config-empty').textContent = 'Loading…';
+  try {
+    const r = await apiFetch('/api/v1/config');
+    configData = await r.json();
+    renderConfig();
+  } catch (e) {
+    document.getElementById('config-empty').textContent = 'Load failed.';
+  }
+}
+
+function renderConfig() {
+  const tbody = document.getElementById('config-body');
+  tbody.innerHTML = '';
+  const keys = Object.keys(configData);
+  document.getElementById('config-empty').style.display = keys.length ? 'none' : 'block';
+  if (!keys.length) return;
+
+  keys.forEach(k => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${k}</td>
+      <td><input type="text" value="${configData[k]}" data-key="${k}" onchange="markDirty(this)"></td>
+      <td><button class="config-save-btn" data-key="${k}" onclick="saveConfig(this)">Save</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function markDirty(input) {
+  const key = input.dataset.key;
+  const btn = input.parentElement.nextElementSibling.querySelector('button');
+  btn.style.display = 'inline-block';
+}
+
+async function saveConfig(btn) {
+  const key = btn.dataset.key;
+  const input = btn.closest('tr').querySelector('input');
+  const raw   = input.value;
+  const value = isNaN(raw) ? raw : Number(raw);
+
+  try {
+    const r = await apiFetch('/api/v1/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value }),
+    });
+    if (r.ok) { btn.style.display = 'none'; btn.textContent = 'Saved'; }
+    else setOtaStatus('Config write failed.', 'err');
+  } catch (e) { setOtaStatus('Config write error: ' + e.message, 'err'); }
+}
+
+async function addConfigEntry() {
+  const key = document.getElementById('new-key').value.trim();
+  const raw = document.getElementById('new-val').value.trim();
+  if (!key || !raw) return;
+  const value = isNaN(raw) ? raw : Number(raw);
+  try {
+    await apiFetch('/api/v1/config', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ key, value }),
+    });
+    document.getElementById('new-key').value = '';
+    document.getElementById('new-val').value = '';
+    loadConfig();
+  } catch (e) { setOtaStatus('Add failed: ' + e.message, 'err'); }
+}
+
+/* ── Auto-refresh system info every 30 s ── */
+function loadAll() {
+  loadSystem();
+  loadOtaStatus();
+  loadConfig();
+  connectWs();
+}
+
+setInterval(loadSystem, 30000);
+
+/* ── Boot ── */
+if (token) loadAll();
+</script>
+</body>
+</html>

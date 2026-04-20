@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32-S3 Pilot Dashboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <h1><span class="status-dot" id="conn-dot"></span>ESP32-S3 Pilot Dashboard</h1>
+  <div class="header-right">
+    <div id="token-wrap">
+      <input type="password" id="token-input" placeholder="API token" autocomplete="off">
+      <button class="btn btn-ghost btn-sm" onclick="App.connect()">Connect</button>
+    </div>
+  </div>
+</header>
+
+<div class="main-grid">
+
+  <!-- System info -->
+  <div class="card">
+    <div class="card-title">
+      System info
+      <button class="btn btn-ghost btn-sm" onclick="SystemPanel.refresh()">Refresh</button>
+    </div>
+    <div class="info-grid">
+      <div class="info-item"><label>Firmware</label><span id="s-fw">—</span></div>
+      <div class="info-item"><label>IDF version</label><span id="s-idf">—</span></div>
+      <div class="info-item"><label>IP address</label><span class="mono" id="s-ip">—</span></div>
+      <div class="info-item"><label>Wi-Fi RSSI</label><span id="s-rssi">—</span></div>
+      <div class="info-item"><label>Uptime</label><span id="s-uptime">—</span></div>
+      <div class="info-item"><label>Free heap</label><span id="s-heap">—</span></div>
+      <div class="info-item"><label>Min heap</label><span id="s-mheap">—</span></div>
+      <div class="info-item"><label>Free PSRAM</label><span id="s-psram">—</span></div>
+      <div class="info-item"><label>LittleFS</label><span id="s-lfs">—</span></div>
+    </div>
+  </div>
+
+  <!-- OTA -->
+  <div class="card">
+    <div class="card-title">OTA firmware update</div>
+    <div class="ota-meta" id="ota-meta"></div>
+    <div id="drop-zone">
+      <input type="file" id="fw-file" accept=".bin">
+      <p>Drag &amp; drop <strong>.bin</strong> file here<br>or click to browse</p>
+      <div id="file-name"></div>
+    </div>
+    <div class="progress-wrap" id="prog-wrap">
+      <div class="progress-bar-bg"><div class="progress-bar-fill" id="prog-fill"></div></div>
+      <div class="progress-label"><span id="prog-bytes">0 B</span><span id="prog-pct">0%</span></div>
+    </div>
+    <div id="ota-status"></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn btn-primary" id="btn-upload" onclick="OtaPanel.upload()" disabled>Upload firmware</button>
+      <button class="btn btn-danger"  onclick="OtaPanel.rollback()">Rollback</button>
+    </div>
+  </div>
+
+  <!-- Config -->
+  <div class="card">
+    <div class="card-title">
+      Device configuration
+      <button class="btn btn-ghost btn-sm" onclick="ConfigPanel.refresh()">Refresh</button>
+    </div>
+    <div style="overflow-x:auto;">
+      <table id="config-table">
+        <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+        <tbody id="config-body"></tbody>
+      </table>
+      <div id="config-empty">Loading…</div>
+    </div>
+    <div class="new-key-row">
+      <input type="text" id="new-key" placeholder="key">
+      <input type="text" id="new-val" placeholder="value">
+      <button class="btn btn-primary btn-sm" onclick="ConfigPanel.addEntry()">Add</button>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="card span2">
+    <div class="card-title">
+      Live log stream
+      <div class="log-controls">
+        <span id="ws-status">Disconnected</span>
+        <button class="btn btn-ghost btn-sm" onclick="LogPanel.connect()">Connect WS</button>
+        <button class="btn btn-ghost btn-sm" onclick="LogPanel.clear()">Clear</button>
+        <label class="log-auto">
+          <input type="checkbox" id="chk-scroll" checked> Auto-scroll
+        </label>
+      </div>
+    </div>
+    <div id="log-console"></div>
+  </div>
+
+</div><!-- /main-grid -->
+
+<script src="/app.js"></script>
+</body>
+</html>

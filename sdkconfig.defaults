@@ -1,0 +1,42 @@
+# ── Partition table ─────────────────────────────────────────────────────────
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ── Flash size ───────────────────────────────────────────────────────────────
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# ── PSRAM – ESP32-S3-WROOM-1U-N8R8 (OPI / Octal PSRAM) ─────────────────────
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+
+# ── HTTPS server ─────────────────────────────────────────────────────────────
+CONFIG_ESP_HTTPS_SERVER_ENABLE=y
+
+# ── WebSocket support ────────────────────────────────────────────────────────
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# ── TLS / mbedTLS – dynamic buffers for parallel connections ─────────────────
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# ── OTA ──────────────────────────────────────────────────────────────────────
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=n
+
+# ── Provisioning security (IDF 6.0: Security 0 and 1 disabled by default) ───
+# We use Security 2 (SRP6a) only – no need to re-enable the weaker versions.
+
+# ── LittleFS ─────────────────────────────────────────────────────────────────
+CONFIG_LITTLEFS_MAX_PARTITIONS=1
+CONFIG_LITTLEFS_PAGE_SIZE=256
+CONFIG_LITTLEFS_OBJ_NAME_LEN=64
+
+# ── IDF 6.0: Picolibc is the new default libc ────────────────────────────────
+# No explicit override needed – Picolibc is fully compatible with our codebase.
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

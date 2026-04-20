@@ -1,0 +1,70 @@
+menu "Pilot System Configuration"
+
+    config PILOT_BLE_DEVICE_NAME
+        string "BLE provisioning device name"
+        default "ESP32S3_PILOT"
+
+    config PILOT_FACTORY_PARTITION_NAME
+        string "Factory NVS partition name"
+        default "fct_data"
+
+    config PILOT_FACTORY_NVS_NAMESPACE
+        string "Factory NVS namespace"
+        default "storage"
+
+    config PILOT_FALLBACK_POP_CODE
+        string "Fallback device password (compile-time, Security 2 / SRP6a)"
+        default "CHANGE_ME_BEFORE_PRODUCTION"
+        help
+            SRP6a password (P). Called 'PoP' in ESP-IDF docs.
+            Used only when factory NVS key "device_password" is absent.
+
+    config PILOT_RESET_BUTTON_GPIO
+        int "Factory reset button GPIO number"
+        default 0
+        range 0 48
+
+    config PILOT_RESET_HOLD_TIME_MS
+        int "Reset button hold time (ms)"
+        default 10000
+        range 3000 30000
+
+    config PILOT_OTA_MAX_SIZE_BYTES
+        int "Maximum accepted OTA firmware size (bytes)"
+        default 2621440
+        help
+            Guard against oversized uploads. Default 2.5 MB matches ota_0/1.
+
+    config PILOT_OTA_BUF_SIZE
+        int "OTA receive buffer size (bytes, PSRAM)"
+        default 32768
+        range 4096 65536
+
+    config PILOT_LOG_WS_QUEUE_DEPTH
+        int "Log WebSocket queue depth"
+        default 64
+        range 16 256
+
+    config PILOT_LOG_WS_MSG_MAX_LEN
+        int "Max log message length over WebSocket"
+        default 256
+        range 64 512
+
+    config PILOT_HTTPS_PORT
+        int "HTTPS server port"
+        default 443
+        range 1 65535
+
+    config PILOT_LITTLEFS_PARTITION_LABEL
+        string "LittleFS partition label"
+        default "littlefs"
+        help
+            Must match the label in partitions.csv.
+
+    config PILOT_LITTLEFS_BASE_PATH
+        string "LittleFS mount point"
+        default "/www"
+        help
+            VFS mount point. Static files are served from this path.
+
+endmenu

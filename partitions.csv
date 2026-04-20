@@ -1,0 +1,10 @@
+# ESP32-S3 Pilot – Custom partition table for 8MB Flash
+# OTA partitions reduced to 2.5 MB each to accommodate the LittleFS partition.
+# Name,     Type,  SubType,  Offset,    Size,      Flags
+nvs,        data,  nvs,      0x9000,    0x6000,
+otadata,    data,  ota,      0xF000,    0x2000,
+fct_data,   data,  nvs,      0x11000,   0x3000,
+phy_init,   data,  phy,      0x14000,   0x1000,
+ota_0,      app,   ota_0,    0x20000,   0x280000,
+ota_1,      app,   ota_1,    0x2A0000,  0x280000,
+littlefs,   data,  spiffs,   0x520000,  0x2E0000,
