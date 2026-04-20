@@ -76,6 +76,7 @@ $<TARGET_FILE:__idf_esp_phy>
 $<TARGET_FILE:__idf_esp_netif>
 $<TARGET_FILE:__idf_wpa_supplicant>
 $<TARGET_FILE:__idf_esp_coex>
+$<TARGET_FILE:coexist>
 $<TARGET_FILE:esp_wifi_core>
 $<TARGET_FILE:esp_wifi_espnow>
 $<TARGET_FILE:esp_wifi_mesh>
@@ -137,6 +138,9 @@ $<TARGET_FILE:idf::esp_coex>
 $<TARGET_FILE:idf::esp_wifi>
 $<TARGET_FILE:idf::esp_driver_spi>
 $<TARGET_FILE:idf::esp_gdbstub>
+$<TARGET_FILE:idf::bt>
+$<TARGET_FILE:__idf_esp_driver_spi>
+$<TARGET_FILE:bt_btdm_app>
 $<TARGET_FILE:idf::unity>
 $<TARGET_FILE:idf::cmock>
 $<TARGET_FILE:__idf_unity>
@@ -175,13 +179,13 @@ $<TARGET_FILE:idf::esp_driver_sdm>
 $<TARGET_FILE:idf::esp_driver_sdmmc>
 $<TARGET_FILE:__idf_esp_driver_sd_intf>
 $<TARGET_FILE:idf::esp_driver_sdspi>
-$<TARGET_FILE:__idf_esp_driver_spi>
 $<TARGET_FILE:idf::esp_driver_touch_sens>
 $<TARGET_FILE:idf::esp_driver_tsens>
 $<TARGET_FILE:idf::esp_driver_twai>
 $<TARGET_FILE:idf::esp_eth>
 $<TARGET_FILE:idf::esp_hal_lcd>
 $<TARGET_FILE:idf::esp_hid>
+$<TARGET_FILE:__idf_bt>
 $<TARGET_FILE:idf::tcp_transport>
 $<TARGET_FILE:idf::esp_http_client>
 $<TARGET_FILE:idf::esp_http_server>
@@ -205,11 +209,11 @@ $<TARGET_FILE:__idf_esp_driver_sdspi>
 $<TARGET_FILE:idf::perfmon>
 $<TARGET_FILE:idf::rt>
 $<TARGET_FILE:idf::spiffs>
+$<TARGET_FILE:idf::joltwallet__littlefs>
 $<TARGET_FILE:idf::espressif__cjson>
 $<TARGET_FILE:idf::espressif__network_provisioning>
 $<TARGET_FILE:__idf_espressif__cjson>
-$<TARGET_FILE:idf::joltwallet__littlefs>
 $<TARGET_FILE:idf::main>
 $<TARGET_FILE:__idf_spiffs>
-$<TARGET_FILE:__idf_espressif__network_provisioning>
 $<TARGET_FILE:__idf_joltwallet__littlefs>
+$<TARGET_FILE:__idf_espressif__network_provisioning>

@@ -719,17 +719,17 @@ endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
+  include("/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/cmake_install.cmake")
+endif()
+
+if(NOT CMAKE_INSTALL_LOCAL_ONLY)
+  # Include the install script for the subdirectory.
   include("/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/espressif__cjson/cmake_install.cmake")
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
   include("/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/espressif__network_provisioning/cmake_install.cmake")
-endif()
-
-if(NOT CMAKE_INSTALL_LOCAL_ONLY)
-  # Include the install script for the subdirectory.
-  include("/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/cmake_install.cmake")
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)

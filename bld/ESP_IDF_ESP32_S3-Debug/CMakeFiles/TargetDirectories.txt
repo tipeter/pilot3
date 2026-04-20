@@ -658,6 +658,7 @@
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/esp_gdbstub/CMakeFiles/install.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/esp_gdbstub/CMakeFiles/install/local.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/esp_gdbstub/CMakeFiles/install/strip.dir
+/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/bt/CMakeFiles/__idf_bt.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/bt/CMakeFiles/edit_cache.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/bt/CMakeFiles/rebuild_cache.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/bt/CMakeFiles/list_install_components.dir
@@ -1120,6 +1121,13 @@
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/ulp/CMakeFiles/install.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/ulp/CMakeFiles/install/local.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/ulp/CMakeFiles/install/strip.dir
+/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/__idf_joltwallet__littlefs.dir
+/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/edit_cache.dir
+/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/rebuild_cache.dir
+/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/list_install_components.dir
+/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/install.dir
+/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/install/local.dir
+/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/install/strip.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/espressif__cjson/CMakeFiles/__idf_espressif__cjson.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/espressif__cjson/CMakeFiles/edit_cache.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/espressif__cjson/CMakeFiles/rebuild_cache.dir
@@ -1134,13 +1142,6 @@
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/espressif__network_provisioning/CMakeFiles/install.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/espressif__network_provisioning/CMakeFiles/install/local.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/espressif__network_provisioning/CMakeFiles/install/strip.dir
-/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/__idf_joltwallet__littlefs.dir
-/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/edit_cache.dir
-/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/rebuild_cache.dir
-/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/list_install_components.dir
-/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/install.dir
-/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/install/local.dir
-/home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/joltwallet__littlefs/CMakeFiles/install/strip.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/main/CMakeFiles/__idf_main.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/main/CMakeFiles/littlefs_littlefs_bin.dir
 /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/esp-idf/main/CMakeFiles/littlefs-flash.dir

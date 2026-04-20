@@ -1,18 +1,18 @@
 #include "wifi_manager.h"
-#include "nvs_config.h"
-#include "sdkconfig.h"
-#include "esp_log.h"
-#include "esp_wifi.h"
 #include "esp_event.h"
+#include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_system.h"
-#include "esp_mac.h"
+#include "esp_wifi.h"
+#include "nvs_config.h"
+#include "sdkconfig.h"
 /* IDF 6.0: wifi_provisioning removed; use network_provisioning managed component. */
-#include "network_provisioning/manager.h"
-#include "network_provisioning/scheme_ble.h"
 #include "esp_srp.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "network_provisioning/manager.h"
+#include "network_provisioning/scheme_ble.h"
 #include <string.h>
 
 static const char *TAG = "WIFI_MGR";
