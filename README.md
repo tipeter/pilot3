@@ -92,4 +92,3 @@ curl -k -X POST \
   --data-binary @build/esp32s3_pilot.bin \
   https://<ip>/api/v1/ota
 ```
-# pilot3
