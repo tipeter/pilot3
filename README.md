@@ -1,6 +1,6 @@
 # ESP32-S3 Pilot Firmware
 
-Production-grade ESP-IDF v5.5 firmware. SRP/SSOT elvek mentén felépített moduláris architektúra.
+Production-grade ESP-IDF v6.0 firmware. SRP/SSOT elvek mentén felépített moduláris architektúra.
 
 ## Modul felelősségek (SRP)
 
