@@ -1,2 +1,0 @@
-source /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/bootloader/gdbinit/symbols
-source /home/ptihanyi/esp32/Projects/pilot3/bld/ESP_IDF_ESP32_S3-Debug/bootloader/gdbinit/connect

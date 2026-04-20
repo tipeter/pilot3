@@ -3,7 +3,7 @@
 # ----------------------------------------------------------------------
 # A fordítási folyamat során generált összes fájl
 build/
-
+bld/
 # Az ESP-IDF Component Manager által letöltött komponensek
 managed_components/
 
