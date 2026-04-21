@@ -1,8 +1,9 @@
-#include "littlefs_mgr.h"
 #include "sdkconfig.h"
-#include "esp_log.h"
 #include "esp_littlefs.h"
+#include "esp_log.h"
 #include <string.h>
+
+#include "littlefs_mgr.h"
 
 static const char *TAG = "LITTLEFS_MGR";
 
