@@ -1,4 +1,3 @@
-#include "wifi_manager.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -14,6 +13,8 @@
 #include "network_provisioning/manager.h"
 #include "network_provisioning/scheme_ble.h"
 #include <string.h>
+
+#include "wifi_manager.h"
 
 static const char *TAG = "WIFI_MGR";
 
