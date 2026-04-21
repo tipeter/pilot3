@@ -8,7 +8,7 @@
 #include "esp_app_desc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/atomic.h"
+#include <stdatomic.h>
 #include "esp_heap_caps.h"
 #include "cJSON.h"
 #include <string.h>
@@ -19,9 +19,11 @@ static const char *TAG = "OTA_HANDLER";
 #define OTA_BUF_SIZE    CONFIG_PILOT_OTA_BUF_SIZE
 #define OTA_MAX_BYTES   CONFIG_PILOT_OTA_MAX_SIZE_BYTES
 
-/* Shared atomic progress state (bytes received so far). */
+/* Atomic progress counters: written by the OTA HTTP handler task,
+ * read by the OTA status handler task. _Atomic guarantees that
+ * concurrent reads on the other core see consistent values. */
 static _Atomic uint32_t s_ota_bytes_received = 0;
-static _Atomic uint32_t s_ota_total_bytes = 0;
+static _Atomic uint32_t s_ota_total_bytes    = 0;
 
 /* ── Internal helpers ───────────────────────────────────────────────────── */
 
@@ -82,9 +84,9 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    /* Reset progress counters. */
-    s_ota_bytes_received = 0;
-    s_ota_total_bytes    = (uint32_t)req->content_len;
+    /* Reset progress counters atomically before starting. */
+    atomic_store(&s_ota_bytes_received, 0);
+    atomic_store(&s_ota_total_bytes, (uint32_t)req->content_len);
 
     size_t remaining = req->content_len;
     bool first_chunk = true;
@@ -125,8 +127,17 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         }
 
         remaining                -= (size_t)received;
-        s_ota_bytes_received     += (uint32_t)received;
-        broadcast_ota_progress(s_ota_bytes_received, s_ota_total_bytes);
+        uint32_t prev = atomic_fetch_add(&s_ota_bytes_received, (uint32_t)received);
+        uint32_t curr = prev + (uint32_t)received;
+        uint32_t tot  = atomic_load(&s_ota_total_bytes);
+        /* Throttle WS broadcasts to ~1% steps to avoid flooding the queue. */
+        if (tot > 0) {
+            uint32_t prev_pct = (uint32_t)((uint64_t)prev * 100 / tot);
+            uint32_t curr_pct = (uint32_t)((uint64_t)curr * 100 / tot);
+            if (curr_pct > prev_pct) {
+                broadcast_ota_progress(curr, tot);
+            }
+        }
     }
 
     free(buf);
@@ -203,9 +214,10 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     cJSON_AddStringToObject(root, "partition",  running->label);
     cJSON_AddNumberToObject(root, "ota_state",  (double)state);
 
-    /* In-flight progress (non-zero only during an active upload). */
-    uint32_t rx  = s_ota_bytes_received;
-    uint32_t tot = s_ota_total_bytes;
+    /* In-flight progress (non-zero only during an active upload).
+     * atomic_load ensures we see a consistent snapshot. */
+    uint32_t rx  = atomic_load(&s_ota_bytes_received);
+    uint32_t tot = atomic_load(&s_ota_total_bytes);
     if (tot > 0) {
         cJSON_AddNumberToObject(root, "progress_bytes", (double)rx);
         cJSON_AddNumberToObject(root, "progress_total", (double)tot);

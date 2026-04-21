@@ -1,0 +1,3730 @@
+================================================================================
+PROJECT STRUCTURE:
+================================================================================
+.
+├── cert_gen.sh
+├── CMakeLists.txt
+├── dependencies.lock
+├── esp_project_context.txt
+├── export_content.sh
+├── main
+│   ├── auth.c
+│   ├── auth.h
+│   ├── certs
+│   │   ├── server.crt
+│   │   └── server.key
+│   ├── CMakeLists.txt
+│   ├── config_handler.c
+│   ├── config_handler.h
+│   ├── idf_component.yml
+│   ├── Kconfig.projbuild
+│   ├── littlefs_mgr.c
+│   ├── littlefs_mgr.h
+│   ├── log_ws.c
+│   ├── log_ws.h
+│   ├── main.c
+│   ├── nvs_config.c
+│   ├── nvs_config.h
+│   ├── ota_handler.c
+│   ├── ota_handler.h
+│   ├── static_handler.c
+│   ├── static_handler.h
+│   ├── system_handler.c
+│   ├── system_handler.h
+│   ├── web_server.c
+│   ├── web_server.h
+│   ├── web_ui.html
+│   ├── wifi_manager.c
+│   └── wifi_manager.h
+├── partitions.csv
+├── README.md
+├── sdkconfig
+├── sdkconfig.defaults
+└── www
+    ├── app.js
+    ├── index.html
+    └── style.css
+
+4 directories, 39 files
+
+================================================================================
+FILE CONTENTS:
+================================================================================
+
+--- FILE: ./CMakeLists.txt ---
+# For more information about build system see
+# https://docs.espressif.com/projects/esp-idf/en/latest/api-guides/build-system.html
+# The following five lines of boilerplate have to be in your project's
+# CMakeLists in this exact order for cmake to work correctly
+cmake_minimum_required(VERSION 3.20)
+
+set(CMAKE_CXX_STANDARD 20)
+# set(EXTRA_COMPONENT_DIRS components)
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+get_filename_component(ProjectId ${CMAKE_CURRENT_LIST_DIR} NAME)
+string(REPLACE " " "_" ProjectId ${ProjectId})
+project(${ProjectId})
+
+--- END OF FILE ---
+
+--- FILE: ./main/auth.c ---
+#include "auth.h"
+#include "nvs_config.h"
+#include "sdkconfig.h"
+#include "esp_log.h"
+#include "esp_random.h"
+#include <string.h>
+#include <stdio.h>
+
+static const char *TAG = "AUTH";
+
+/* NVS key under which the API token is stored in the app namespace. */
+#define TOKEN_NVS_KEY "api_token"
+
+/* Fixed-length token: 32 hex chars = 16 random bytes. */
+#define TOKEN_LEN 32
+
+/* In-memory copy of the active token – zero-initialised. */
+static char s_token[TOKEN_LEN + 1] = {0};
+
+/* ── Internal helpers ───────────────────────────────────────────────────── */
+
+static void generate_random_token(char *buf, size_t len)
+{
+    /* len must be TOKEN_LEN + 1 (NUL included). */
+    uint8_t raw[TOKEN_LEN / 2];
+    esp_fill_random(raw, sizeof(raw));
+    for (size_t i = 0; i < sizeof(raw); i++) {
+        snprintf(buf + i * 2, 3, "%02x", raw[i]);
+    }
+    buf[TOKEN_LEN] = '\0';
+}
+
+/* ── Public API ─────────────────────────────────────────────────────────── */
+
+esp_err_t auth_init(void)
+{
+    /* 1. Try factory NVS first. */
+    size_t len = sizeof(s_token);
+    esp_err_t err = nvs_factory_get_str(TOKEN_NVS_KEY, s_token, &len);
+    if (err == ESP_OK && strnlen(s_token, TOKEN_LEN + 1) >= 8) {
+        ESP_LOGI(TAG, "API token loaded from factory NVS.");
+        return ESP_OK;
+    }
+
+    /* 2. Try application NVS (persisted from a previous boot). */
+    len = sizeof(s_token);
+    err = nvs_config_get_str(TOKEN_NVS_KEY, s_token, &len);
+    if (err == ESP_OK && strnlen(s_token, TOKEN_LEN + 1) >= 8) {
+        ESP_LOGI(TAG, "API token loaded from application NVS.");
+        return ESP_OK;
+    }
+
+    /* 3. Generate a fresh token and persist it. */
+    generate_random_token(s_token, sizeof(s_token));
+    err = nvs_config_set_str(TOKEN_NVS_KEY, s_token);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to persist generated token: %s", esp_err_to_name(err));
+        /* Not fatal – the token is still valid for this boot. */
+    }
+
+    /* Log prominently so the operator can retrieve it from the console. */
+    ESP_LOGW(TAG, "╔══════════════════════════════════════════════════╗");
+    ESP_LOGW(TAG, "║  NEW API TOKEN GENERATED – NOTE THIS DOWN        ║");
+    ESP_LOGW(TAG, "║  Token: %-40s ║", s_token);
+    ESP_LOGW(TAG, "╚══════════════════════════════════════════════════╝");
+
+    return ESP_OK;
+}
+
+bool auth_validate_token(const char *token)
+{
+    if (!token || s_token[0] == '\0') return false;
+    /* Constant-time comparison to prevent timing attacks. */
+    size_t a_len = strnlen(s_token, TOKEN_LEN + 1);
+    size_t b_len = strnlen(token,   TOKEN_LEN + 1);
+    if (a_len != b_len) return false;
+    volatile uint8_t diff = 0;
+    for (size_t i = 0; i < a_len; i++) {
+        diff |= (uint8_t)(s_token[i] ^ token[i]);
+    }
+    return (diff == 0);
+}
+
+bool auth_check_bearer(httpd_req_t *req)
+{
+    /* Retrieve the Authorization header. */
+    size_t hdr_len = httpd_req_get_hdr_value_len(req, "Authorization");
+    if (hdr_len == 0) {
+        ESP_LOGW(TAG, "Missing Authorization header from %s", req->uri);
+        httpd_resp_set_status(req, "401 Unauthorized");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer realm=\"ESP32-S3 Pilot\"");
+        httpd_resp_sendstr(req, "{\"error\":\"Unauthorized\"}");
+        return false;
+    }
+
+    /* hdr_len does not include the NUL terminator. */
+    char *hdr = malloc(hdr_len + 1);
+    if (!hdr) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return false;
+    }
+
+    httpd_req_get_hdr_value_str(req, "Authorization", hdr, hdr_len + 1);
+
+    /* Expect "Bearer <token>" */
+    const char *prefix = "Bearer ";
+    const size_t prefix_len = strlen(prefix);
+    bool valid = false;
+
+    if (strncmp(hdr, prefix, prefix_len) == 0) {
+        valid = auth_validate_token(hdr + prefix_len);
+    }
+
+    free(hdr);
+
+    if (!valid) {
+        ESP_LOGW(TAG, "Invalid token for %s", req->uri);
+        httpd_resp_set_status(req, "401 Unauthorized");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer realm=\"ESP32-S3 Pilot\"");
+        httpd_resp_sendstr(req, "{\"error\":\"Forbidden\"}");
+    }
+    return valid;
+}
+
+--- END OF FILE ---
+
+--- FILE: ./main/auth.h ---
+#pragma once
+
+#include "esp_err.h"
+#include "esp_http_server.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief Load the API token from factory NVS (key "api_token").
+ *        If absent, generates a random 32-char hex token, stores it in
+ *        the main application NVS and logs it to UART so the operator
+ *        can retrieve it from the serial console.
+ *
+ *        Must be called after nvs_config_init().
+ */
+esp_err_t auth_init(void);
+
+/**
+ * @brief Validate the Bearer token in an HTTP request's Authorization header.
+ *
+ * @param req  Incoming HTTP request.
+ * @return true   Token is valid.
+ * @return false  Token is missing or invalid; the handler should return ESP_FAIL
+ *                immediately (a 401 response has already been sent).
+ */
+bool auth_check_bearer(httpd_req_t *req);
+
+/**
+ * @brief Validate a token string directly (used for WebSocket query-param auth).
+ *
+ * @param token  NUL-terminated token string to validate.
+ * @return true  if the token matches the stored value.
+ */
+bool auth_validate_token(const char *token);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END OF FILE ---
+
+--- FILE: ./main/CMakeLists.txt ---
+idf_component_register(
+    SRCS "main.c" "wifi_manager.c" "auth.c" "nvs_config.c" "littlefs_mgr.c"
+         "web_server.c" "static_handler.c" "system_handler.c" "config_handler.c"
+         "ota_handler.c" "log_ws.c"
+    INCLUDE_DIRS "."
+    REQUIRES nvs_flash esp_wifi esp_netif esp_event
+             esp_https_server esp_http_server esp_partition app_update
+             esp_system esp_timer esp_driver_gpio mbedtls
+             network_provisioning
+    EMBED_TXTFILES "certs/server.crt" "certs/server.key" "web_ui.html"
+)
+
+littlefs_create_partition_image(littlefs ../www FLASH_IN_PROJECT)
+--- END OF FILE ---
+
+--- FILE: ./main/config_handler.c ---
+#include "config_handler.h"
+#include "auth.h"
+#include "nvs_config.h"
+#include "esp_log.h"
+#include "cJSON.h"
+#include <string.h>
+
+static const char *TAG = "CFG_HANDLER";
+
+/* ── GET /api/v1/config ─────────────────────────────────────────────────── */
+
+static esp_err_t config_get_handler(httpd_req_t *req)
+{
+    if (!auth_check_bearer(req)) return ESP_FAIL;
+
+    cJSON *obj = NULL;
+    if (nvs_config_get_all_json(&obj) != ESP_OK || !obj) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS read error");
+        return ESP_FAIL;
+    }
+
+    char *json = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "JSON error");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    free(json);
+    return ESP_OK;
+}
+
+/* ── POST /api/v1/config ────────────────────────────────────────────────── */
+
+static esp_err_t config_post_handler(httpd_req_t *req)
+{
+    if (!auth_check_bearer(req)) return ESP_FAIL;
+
+    if (req->content_len == 0 || req->content_len > 512) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body size");
+        return ESP_FAIL;
+    }
+
+    char *body = malloc(req->content_len + 1);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    int received = httpd_req_recv(req, body, req->content_len);
+    if (received <= 0) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *key_item = cJSON_GetObjectItem(root, "key");
+    cJSON *val_item = cJSON_GetObjectItem(root, "value");
+
+    if (!cJSON_IsString(key_item) || !key_item->valuestring) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing 'key'");
+        return ESP_FAIL;
+    }
+
+    const char *key = key_item->valuestring;
+    esp_err_t   err = ESP_ERR_INVALID_ARG;
+
+    if (cJSON_IsString(val_item)) {
+        err = nvs_config_set_str(key, val_item->valuestring);
+    } else if (cJSON_IsNumber(val_item)) {
+        err = nvs_config_set_i32(key, (int32_t)val_item->valuedouble);
+    } else {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid 'value'");
+        return ESP_FAIL;
+    }
+    cJSON_Delete(root);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS write for key '%s': %s", key, esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS write failed");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+/* ── URI table ──────────────────────────────────────────────────────────── */
+
+static const httpd_uri_t s_uris[] = {
+    { .uri = "/api/v1/config", .method = HTTP_GET,  .handler = config_get_handler  },
+    { .uri = "/api/v1/config", .method = HTTP_POST, .handler = config_post_handler },
+};
+
+esp_err_t config_handler_register(httpd_handle_t server)
+{
+    esp_err_t err = ESP_OK;
+    for (size_t i = 0; i < sizeof(s_uris) / sizeof(s_uris[0]); i++) {
+        err = httpd_register_uri_handler(server, &s_uris[i]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to register '%s': %s",
+                     s_uris[i].uri, esp_err_to_name(err));
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
+--- END OF FILE ---
+
+--- FILE: ./main/config_handler.h ---
+#pragma once
+
+#include "esp_err.h"
+#include "esp_http_server.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @file config_handler.h
+ * @brief Single responsibility: device configuration REST endpoints.
+ *
+ * Endpoints:
+ *   GET  /api/v1/config  – returns all NVS config keys as JSON.
+ *   POST /api/v1/config  – sets one NVS key. Body: {"key":"k","value":"v"|n}
+ * Auth: Bearer token required on both endpoints.
+ */
+esp_err_t config_handler_register(httpd_handle_t server);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END OF FILE ---
+
+--- FILE: ./main/littlefs_mgr.c ---
+#include "sdkconfig.h"
+#include "esp_littlefs.h"
+#include "esp_log.h"
+#include <string.h>
+
+#include "littlefs_mgr.h"
+
+static const char *TAG = "LITTLEFS_MGR";
+
+/* ── Module-private state (SSOT) ───────────────────────────────────────── */
+
+static bool s_mounted = false;
+
+/* ── Public API ─────────────────────────────────────────────────────────── */
+
+esp_err_t littlefs_mgr_init(void)
+{
+    if (s_mounted) {
+        return ESP_OK;
+    }
+
+    esp_vfs_littlefs_conf_t cfg = {
+        .base_path              = CONFIG_PILOT_LITTLEFS_BASE_PATH,
+        .partition_label        = CONFIG_PILOT_LITTLEFS_PARTITION_LABEL,
+        .format_if_mount_failed = false,
+        .dont_mount             = false,
+    };
+
+    esp_err_t err = esp_vfs_littlefs_register(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to mount LittleFS (%s). "
+                 "Run 'idf.py littlefs-flash' to flash the partition.",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    s_mounted = true;
+
+    size_t total = 0, used = 0;
+    littlefs_mgr_stat(&total, &used);
+    ESP_LOGI(TAG, "LittleFS mounted at '%s' – used %zu / %zu bytes.",
+             CONFIG_PILOT_LITTLEFS_BASE_PATH, used, total);
+    return ESP_OK;
+}
+
+esp_err_t littlefs_mgr_deinit(void)
+{
+    if (!s_mounted) return ESP_OK;
+    esp_err_t err = esp_vfs_littlefs_unregister(
+                        CONFIG_PILOT_LITTLEFS_PARTITION_LABEL);
+    if (err == ESP_OK) {
+        s_mounted = false;
+        ESP_LOGI(TAG, "LittleFS unmounted.");
+    }
+    return err;
+}
+
+bool littlefs_mgr_is_mounted(void)
+{
+    return s_mounted;
+}
+
+const char *littlefs_mgr_base_path(void)
+{
+    return s_mounted ? CONFIG_PILOT_LITTLEFS_BASE_PATH : NULL;
+}
+
+esp_err_t littlefs_mgr_stat(size_t *total_bytes, size_t *used_bytes)
+{
+    if (!s_mounted) return ESP_ERR_INVALID_STATE;
+    size_t t = 0, u = 0;
+    esp_err_t err = esp_littlefs_info(
+                        CONFIG_PILOT_LITTLEFS_PARTITION_LABEL, &t, &u);
+    if (err == ESP_OK) {
+        if (total_bytes) *total_bytes = t;
+        if (used_bytes)  *used_bytes  = u;
+    }
+    return err;
+}
+
+--- END OF FILE ---
+
+--- FILE: ./main/littlefs_mgr.h ---
+#pragma once
+
+#include "esp_err.h"
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @file littlefs_mgr.h
+ * @brief Single owner of the LittleFS filesystem lifecycle and mount state.
+ *
+ * SSOT responsibilities:
+ *  - Filesystem mount / unmount state (no other module checks this directly).
+ *  - Base path string (all modules that need it call littlefs_mgr_base_path()).
+ *  - Partition label (sourced from Kconfig, never repeated elsewhere).
+ *
+ * Other modules must NEVER call esp_littlefs_* directly; they use this API.
+ */
+
+/**
+ * @brief Mount the LittleFS partition and register it with the VFS.
+ *
+ *        Idempotent: safe to call multiple times; returns ESP_OK if already
+ *        mounted.
+ *
+ * @return ESP_OK on success, or an esp_err_t describing the failure.
+ */
+esp_err_t littlefs_mgr_init(void);
+
+/**
+ * @brief Unmount the LittleFS partition and unregister from the VFS.
+ *        No-op if not mounted.
+ */
+esp_err_t littlefs_mgr_deinit(void);
+
+/**
+ * @brief Query mount state.
+ * @return true  if the filesystem is currently mounted and usable.
+ * @return false otherwise.
+ */
+bool littlefs_mgr_is_mounted(void);
+
+/**
+ * @brief Return the VFS base path (e.g. "/www").
+ *
+ *        The returned pointer is valid for the lifetime of the process.
+ *        Returns NULL if not mounted.
+ */
+const char *littlefs_mgr_base_path(void);
+
+/**
+ * @brief Fill *total_bytes and *used_bytes with filesystem usage statistics.
+ *        Both output parameters may be NULL if the caller does not need them.
+ *
+ * @return ESP_ERR_INVALID_STATE if not mounted.
+ */
+esp_err_t littlefs_mgr_stat(size_t *total_bytes, size_t *used_bytes);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END OF FILE ---
+
+--- FILE: ./main/log_ws.c ---
+#include "log_ws.h"
+#include "auth.h"
+#include "sdkconfig.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdarg.h>
+#include "cJSON.h"
+
+static const char *TAG = "LOG_WS";
+
+#define MSG_MAX_LEN    CONFIG_PILOT_LOG_WS_MSG_MAX_LEN
+#define QUEUE_DEPTH    CONFIG_PILOT_LOG_WS_QUEUE_DEPTH
+#define MAX_WS_CLIENTS 4
+
+/* ── Internal state ─────────────────────────────────────────────────────── */
+
+typedef struct {
+    char     data[MSG_MAX_LEN];
+    uint16_t len;
+} ws_msg_t;
+
+static QueueHandle_t     s_msg_queue;
+static SemaphoreHandle_t s_clients_mutex;
+static int               s_client_fds[MAX_WS_CLIENTS];
+static httpd_handle_t    s_server_handle = NULL;
+
+/* Original vprintf function pointer – we chain to it for UART output. */
+static vprintf_like_t    s_orig_vprintf = NULL;
+
+/* ── Custom vprintf hook ────────────────────────────────────────────────── */
+
+static int log_ws_vprintf(const char *fmt, va_list args)
+{
+    /* IMPORTANT: va_copy MUST happen before s_orig_vprintf consumes args.
+     * Calling va_copy on an already-consumed va_list is undefined behaviour. */
+    char raw[MSG_MAX_LEN];
+    va_list args_copy;
+    va_copy(args_copy, args);
+
+    /* Forward to the original output (UART). */
+    int ret = 0;
+    if (s_orig_vprintf) {
+        ret = s_orig_vprintf(fmt, args);
+    }
+
+    /* Build the raw log string from the copied va_list. */
+    vsnprintf(raw, sizeof(raw), fmt, args_copy);
+    va_end(args_copy);
+
+    /* Strip trailing newline for cleaner JSON. */
+    size_t rlen = strlen(raw);
+    if (rlen > 0 && raw[rlen - 1] == '\n') raw[--rlen] = '\0';
+
+    /* Use cJSON to build the envelope – guarantees correct escaping of
+     * special characters (quotes, backslashes, control chars) in log msgs. */
+    ws_msg_t msg = {0};
+    cJSON *obj = cJSON_CreateObject();
+    if (obj) {
+        cJSON_AddStringToObject(obj, "type", "log");
+        cJSON_AddStringToObject(obj, "msg",  raw);
+        char *json = cJSON_PrintUnformatted(obj);
+        cJSON_Delete(obj);
+        if (json) {
+            msg.len = (uint16_t)strnlen(json, MSG_MAX_LEN - 1);
+            memcpy(msg.data, json, msg.len);
+            free(json);
+            /* Drop silently when the queue is full – logging must never block. */
+            xQueueSendToBack(s_msg_queue, &msg, 0);
+        }
+    }
+
+    return ret;
+}
+
+/* ── WebSocket broadcast task ───────────────────────────────────────────── */
+
+static void log_ws_task(void *arg)
+{
+    ws_msg_t msg;
+    while (1) {
+        if (xQueueReceive(s_msg_queue, &msg, portMAX_DELAY) != pdTRUE) continue;
+        if (!s_server_handle) continue;
+
+        xSemaphoreTake(s_clients_mutex, portMAX_DELAY);
+        for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+            if (s_client_fds[i] < 0) continue;
+
+            httpd_ws_frame_t frame = {
+                .type    = HTTPD_WS_TYPE_TEXT,
+                .payload = (uint8_t *)msg.data,
+                .len     = msg.len,
+                .final   = true,
+            };
+            esp_err_t err = httpd_ws_send_frame_async(s_server_handle,
+                                                       s_client_fds[i],
+                                                       &frame);
+            if (err != ESP_OK) {
+                /* Client likely disconnected; evict it. */
+                ESP_LOGD(TAG, "WS client fd=%d evicted (err=%s)",
+                         s_client_fds[i], esp_err_to_name(err));
+                s_client_fds[i] = -1;
+            }
+        }
+        xSemaphoreGive(s_clients_mutex);
+    }
+}
+
+/* ── WebSocket HTTP handler ─────────────────────────────────────────────── */
+
+static esp_err_t ws_upgrade_handler(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET) {
+        /* Upgrade handshake: authenticate via query-param token. */
+        char query[128] = {0};
+        char token[72]  = {0};
+
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+            httpd_query_key_value(query, "token", token, sizeof(token)) == ESP_OK)
+        {
+            if (!auth_validate_token(token)) {
+                ESP_LOGW(TAG, "WS upgrade rejected: invalid token");
+                httpd_resp_set_status(req, "401 Unauthorized");
+                httpd_resp_sendstr(req, "Forbidden");
+                return ESP_FAIL;
+            }
+        } else {
+            ESP_LOGW(TAG, "WS upgrade rejected: no token");
+            httpd_resp_set_status(req, "401 Unauthorized");
+            httpd_resp_sendstr(req, "Forbidden");
+            return ESP_FAIL;
+        }
+
+        /* Register the new client fd. */
+        int fd = httpd_req_to_sockfd(req);
+        xSemaphoreTake(s_clients_mutex, portMAX_DELAY);
+        bool added = false;
+        for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+            if (s_client_fds[i] < 0) {
+                s_client_fds[i] = fd;
+                added = true;
+                break;
+            }
+        }
+        xSemaphoreGive(s_clients_mutex);
+
+        if (!added) {
+            ESP_LOGW(TAG, "WS client table full, rejecting fd=%d", fd);
+            httpd_resp_set_status(req, "503 Service Unavailable");
+            httpd_resp_sendstr(req, "Too many clients");
+            return ESP_FAIL;
+        }
+
+        ESP_LOGI(TAG, "WS client connected: fd=%d", fd);
+        return ESP_OK;
+    }
+
+    /* Receive frame (ping / close). */
+    httpd_ws_frame_t frame = {.type = HTTPD_WS_TYPE_TEXT};
+    esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
+    if (err != ESP_OK) return err;
+
+    if (frame.type == HTTPD_WS_TYPE_CLOSE || frame.type == HTTPD_WS_TYPE_PING) {
+        int fd = httpd_req_to_sockfd(req);
+        xSemaphoreTake(s_clients_mutex, portMAX_DELAY);
+        for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+            if (s_client_fds[i] == fd) { s_client_fds[i] = -1; break; }
+        }
+        xSemaphoreGive(s_clients_mutex);
+        ESP_LOGI(TAG, "WS client disconnected: fd=%d", fd);
+    }
+    return ESP_OK;
+}
+
+static const httpd_uri_t s_ws_uri = {
+    .uri          = "/ws/log",
+    .method       = HTTP_GET,
+    .handler      = ws_upgrade_handler,
+    .user_ctx     = NULL,
+    .is_websocket = true,
+};
+
+/* ── Public API ─────────────────────────────────────────────────────────── */
+
+esp_err_t log_ws_init(void)
+{
+    s_msg_queue = xQueueCreate(QUEUE_DEPTH, sizeof(ws_msg_t));
+    if (!s_msg_queue) return ESP_ERR_NO_MEM;
+
+    s_clients_mutex = xSemaphoreCreateMutex();
+    if (!s_clients_mutex) return ESP_ERR_NO_MEM;
+
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) s_client_fds[i] = -1;
+
+    /* Chain custom vprintf – keep original for UART output. */
+    s_orig_vprintf = esp_log_set_vprintf(log_ws_vprintf);
+
+    BaseType_t rc = xTaskCreate(log_ws_task, "log_ws_task",
+                                4096, NULL, 3, NULL);
+    return (rc == pdPASS) ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t log_ws_register(httpd_handle_t server)
+{
+    s_server_handle = server;
+    return httpd_register_uri_handler(server, &s_ws_uri);
+}
+
+void log_ws_broadcast_json(const char *json_str)
+{
+    ws_msg_t msg = {0};
+    msg.len = (uint16_t)snprintf(msg.data, MSG_MAX_LEN, "%s", json_str);
+    if (msg.len >= MSG_MAX_LEN) msg.len = MSG_MAX_LEN - 1;
+    xQueueSendToBack(s_msg_queue, &msg, 0);
+}
+
+--- END OF FILE ---
+
+--- FILE: ./main/log_ws.h ---
+#pragma once
+
+#include "esp_err.h"
+#include "esp_http_server.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief Initialise the WebSocket log subsystem.
+ *
+ *        Creates the internal message queue and installs a custom
+ *        vprintf handler that forwards every log line to the queue
+ *        (non-blocking – messages are dropped if the queue is full).
+ *
+ *        Must be called before web_server_start().
+ */
+esp_err_t log_ws_init(void);
+
+/**
+ * @brief Register the WebSocket endpoint with an already-started server.
+ *
+ *        Endpoint: GET /ws/log  (upgraded to WebSocket)
+ *        Authentication: ?token=<api_token> query parameter.
+ *
+ * @param server  Handle returned by httpd_ssl_start() / httpd_start().
+ */
+esp_err_t log_ws_register(httpd_handle_t server);
+
+/**
+ * @brief Enqueue an arbitrary JSON-formatted message for broadcast.
+ *
+ *        Can be called from any task (including the OTA handler) to
+ *        push structured events to all connected WebSocket clients.
+ *
+ * @param json_str  NUL-terminated JSON string.  Truncated to
+ *                  CONFIG_PILOT_LOG_WS_MSG_MAX_LEN if longer.
+ */
+void log_ws_broadcast_json(const char *json_str);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END OF FILE ---
+
+--- FILE: ./main/main.c ---
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "esp_log.h"
+#include "esp_err.h"
+#include "esp_timer.h"
+#include "esp_ota_ops.h"
+#include "nvs_flash.h"
+#include "driver/gpio.h"
+//#include "esp_task_wdt.h"
+
+#include "sdkconfig.h"
+#include "nvs_config.h"
+#include "auth.h"
+#include "wifi_manager.h"
+#include "web_server.h"
+#include "log_ws.h"
+
+static const char *TAG = "MAIN";
+
+/* ── GPIO ISR reset ─────────────────────────────────────────────────────── */
+
+#define RESET_GPIO ((gpio_num_t) CONFIG_PILOT_RESET_BUTTON_GPIO)
+#define RESET_HOLD_MS CONFIG_PILOT_RESET_HOLD_TIME_MS
+
+static QueueHandle_t s_reset_q;
+
+static void IRAM_ATTR reset_isr_handler(void *arg)
+{
+  uint64_t ts = esp_timer_get_time();
+  xQueueSendFromISR(s_reset_q, &ts, NULL);
+}
+
+static void reset_monitor_task(void *arg)
+{
+  //  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
+  uint64_t fall_ts;
+  while (1)
+  {
+    // esp_task_wdt_reset();
+
+    if (xQueueReceive(s_reset_q, &fall_ts, pdMS_TO_TICKS(5000)) != pdTRUE)
+    {
+      continue;
+    }
+
+    ESP_LOGW(TAG,
+             "Reset button pressed – hold for %d ms to factory reset.",
+             RESET_HOLD_MS);
+
+    uint32_t held_ms = 0;
+    while (gpio_get_level(RESET_GPIO) == 0)
+    {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      held_ms += 50;
+      if (held_ms >= (uint32_t) RESET_HOLD_MS)
+      {
+        ESP_LOGW(TAG, "Factory reset confirmed – erasing credentials.");
+        wifi_manager_factory_reset();
+      }
+    }
+    ESP_LOGI(TAG,
+             "Reset button released after %" PRIu32 " ms – ignored.",
+             held_ms);
+  }
+}
+
+static esp_err_t reset_monitor_init(void)
+{
+  s_reset_q = xQueueCreate(4, sizeof(uint64_t));
+  if (!s_reset_q)
+    return ESP_ERR_NO_MEM;
+
+  gpio_config_t cfg = {
+      .pin_bit_mask = (1ULL << RESET_GPIO),
+      .mode = GPIO_MODE_INPUT,
+      .pull_up_en = GPIO_PULLUP_ENABLE,
+      .pull_down_en = GPIO_PULLDOWN_DISABLE,
+      .intr_type = GPIO_INTR_NEGEDGE,
+  };
+  ESP_ERROR_CHECK(gpio_config(&cfg));
+  ESP_ERROR_CHECK(gpio_install_isr_service(0));
+  ESP_ERROR_CHECK(gpio_isr_handler_add(RESET_GPIO, reset_isr_handler, NULL));
+
+  BaseType_t rc
+      = xTaskCreate(reset_monitor_task, "reset_mon", 4096, NULL, 5, NULL);
+  return (rc == pdPASS) ? ESP_OK : ESP_FAIL;
+}
+
+/* ── OTA rollback validation ────────────────────────────────────────────── */
+
+static void validate_firmware_on_connect(void)
+{
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  esp_ota_img_states_t state;
+
+  if (esp_ota_get_state_partition(running, &state) == ESP_OK)
+  {
+    if (state == ESP_OTA_IMG_PENDING_VERIFY)
+    {
+      esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+      if (err == ESP_OK)
+      {
+        ESP_LOGI(TAG, "Firmware marked stable – rollback cancelled.");
+      }
+      else
+      {
+        ESP_LOGE(TAG,
+                 "Failed to mark firmware stable: %s",
+                 esp_err_to_name(err));
+      }
+    }
+  }
+}
+
+/* ── Web server start task ──────────────────────────────────────────────── */
+
+/*
+ * httpd_ssl_start() performs TLS context initialisation which requires
+ * several kilobytes of stack.  The sys_evt task (default event loop task)
+ * has only ~3-4 KB of stack, which is not enough.
+ *
+ * Solution: the Wi-Fi connected callback posts a notification to a
+ * dedicated high-priority task that owns sufficient stack and calls
+ * web_server_start() there.  The task then suspends itself waiting for
+ * the next notification (e.g. after a reconnect cycle).
+ */
+static TaskHandle_t s_server_task_handle = NULL;
+
+static void web_server_task(void *arg)
+{
+  /* Subscribe to TWDT once */
+  // ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
+  ESP_LOGI(TAG,
+           "web_server_task (web_srv) started (stack high-water: %u bytes)",
+           uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
+
+  /* One immediate reset right after subscription */
+  // esp_task_wdt_reset();
+
+  while (1)
+  {
+    /* Block indefinitely until notified by on_wifi_connected(). */
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    ESP_LOGI(TAG,
+             "Starting web server (stack: %u bytes free)!",
+             uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
+    web_server_start();
+  }
+  // while (1)
+  // {
+  // esp_task_wdt_reset(); /* feed every loop – critical */
+
+  /* Wait max 5 seconds for Wi-Fi connected notification */
+  // uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+
+  // if (notified)
+  // {
+  // ESP_LOGI(TAG, "Wi-Fi connected – starting HTTPS server...");
+  // web_server_start();
+  // }
+  /* else: still in provisioning or waiting → just continue feeding TWDT */
+  // }
+}
+
+/* ── Wi-Fi callbacks (called from sys_evt context – must be fast) ───────── */
+
+static void on_wifi_connected(void)
+{
+  validate_firmware_on_connect();
+
+  /* Notify the dedicated server task instead of blocking sys_evt. */
+  if (s_server_task_handle)
+  {
+    xTaskNotifyGive(s_server_task_handle);
+  }
+}
+
+static void on_wifi_disconnected(void)
+{
+  ESP_LOGW(TAG, "Wi-Fi disconnected – waiting for reconnect.");
+}
+
+static void heap_monitor_task(void *pvParameters)
+{
+  // ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
+  while (1)
+  {
+    // esp_task_wdt_reset();
+    vTaskDelay(pdMS_TO_TICKS(10000));
+
+    ESP_LOGI("HEAP",
+             "Free RAM: %u KiB | PSRAM: %u KiB | Largest PSRAM block: %u KiB",
+             heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024,
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024,
+             heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024);
+  }
+}
+
+/* ── app_main ───────────────────────────────────────────────────────────── */
+
+void app_main(void)
+{
+  // #if CONFIG_ESP_TASK_WDT_INIT
+  //   esp_task_wdt_deinit();
+  // #endif // CONFIG_ESP_TASK_WDT_INIT
+
+  //   /* Initialise Task Watchdog (10s timeout, panic on trigger) */
+  //   esp_task_wdt_config_t twdt_config = {
+  //       .timeout_ms = 10000, /* 10 seconds – enough for WiFi/HTTPS/WS operations */
+  //       .trigger_panic = true, /* panic + reset on timeout (production default) */
+  //       .idle_core_mask = (1U << CONFIG_FREERTOS_NUMBER_OF_CORES) - 1,
+  //   };
+  //   ESP_ERROR_CHECK(esp_task_wdt_init(&twdt_config));
+  //   ESP_LOGI(TAG, "Task Watchdog Timer initialised (10s timeout, panic enabled)");
+
+  /* ── 1. NVS flash init ─────────────────────────────────────────────── */
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
+  {
+    ESP_LOGW(TAG, "NVS dirty – erasing and re-initialising.");
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    err = nvs_flash_init();
+  }
+  ESP_ERROR_CHECK(err);
+
+  /* ── 2. Application NVS config ─────────────────────────────────────── */
+  ESP_ERROR_CHECK(nvs_config_init());
+
+  /* ── 3. Auth subsystem ─────────────────────────────────────────────── */
+  ESP_ERROR_CHECK(auth_init());
+
+  /* ── 4. WebSocket log streamer ─────────────────────────────────────── */
+  ESP_ERROR_CHECK(log_ws_init());
+
+  /* ── 5. GPIO reset monitor ─────────────────────────────────────────── */
+  ESP_ERROR_CHECK(reset_monitor_init());
+
+  xTaskCreatePinnedToCore(heap_monitor_task, "heap_mon", 3072, NULL, 3, NULL, 1);
+
+  /* ── 6. Web server task (large stack for TLS init) ─────────────────── */
+  BaseType_t rc = xTaskCreate(web_server_task,
+                              "web_srv",
+                              16384, /* 16 KB – TLS + JSON headroom */
+                              NULL,
+                              5,
+                              &s_server_task_handle);
+  ESP_ERROR_CHECK(rc == pdPASS ? ESP_OK : ESP_FAIL);
+
+  /* ── 7. Wi-Fi manager (provisioning or connect) ────────────────────── */
+  ESP_ERROR_CHECK(wifi_manager_init(on_wifi_connected, on_wifi_disconnected));
+
+  ESP_LOGI(TAG, "Initialisation complete. Scheduler running.");
+}
+
+--- END OF FILE ---
+
+--- FILE: ./main/nvs_config.c ---
+#include "nvs_config.h"
+#include "sdkconfig.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "nvs.h"
+#include <string.h>
+
+static const char *TAG = "NVS_CONFIG";
+
+#define APP_NVS_NAMESPACE        "app_cfg"
+#define FACTORY_PARTITION        CONFIG_PILOT_FACTORY_PARTITION_NAME
+#define FACTORY_NAMESPACE        CONFIG_PILOT_FACTORY_NVS_NAMESPACE
+
+/* ── Internal helpers ───────────────────────────────────────────────────── */
+
+static esp_err_t open_app_nvs(nvs_open_mode_t mode, nvs_handle_t *out)
+{
+    return nvs_open(APP_NVS_NAMESPACE, mode, out);
+}
+
+/* ── Public API ─────────────────────────────────────────────────────────── */
+
+esp_err_t nvs_config_init(void)
+{
+    /* Verify that the namespace is accessible; creates it if absent. */
+    nvs_handle_t h;
+    esp_err_t err = open_app_nvs(NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        nvs_close(h);
+    }
+    return err;
+}
+
+esp_err_t nvs_config_get_str(const char *key, char *buf, size_t *len)
+{
+    nvs_handle_t h;
+    esp_err_t err = open_app_nvs(NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_get_str(h, key, buf, len);
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t nvs_config_set_str(const char *key, const char *value)
+{
+    nvs_handle_t h;
+    esp_err_t err = open_app_nvs(NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(h, key, value);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t nvs_config_get_i32(const char *key, int32_t *out)
+{
+    nvs_handle_t h;
+    esp_err_t err = open_app_nvs(NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_get_i32(h, key, out);
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t nvs_config_set_i32(const char *key, int32_t value)
+{
+    nvs_handle_t h;
+    esp_err_t err = open_app_nvs(NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_i32(h, key, value);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t nvs_config_get_all_json(cJSON **out)
+{
+    nvs_handle_t h;
+    esp_err_t err = open_app_nvs(NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+
+    cJSON *obj = cJSON_CreateObject();
+    if (!obj) { nvs_close(h); return ESP_ERR_NO_MEM; }
+
+    nvs_iterator_t it = NULL;
+    err = nvs_entry_find(NVS_DEFAULT_PART_NAME, APP_NVS_NAMESPACE, NVS_TYPE_ANY, &it);
+
+    while (err == ESP_OK && it != NULL) {
+        nvs_entry_info_t info;
+        nvs_entry_info(it, &info);
+
+        switch (info.type) {
+            case NVS_TYPE_STR: {
+                size_t len = 0;
+                if (nvs_get_str(h, info.key, NULL, &len) == ESP_OK) {
+                    char *val = malloc(len);
+                    if (val && nvs_get_str(h, info.key, val, &len) == ESP_OK) {
+                        cJSON_AddStringToObject(obj, info.key, val);
+                    }
+                    free(val);
+                }
+                break;
+            }
+            case NVS_TYPE_I32: {
+                int32_t val;
+                if (nvs_get_i32(h, info.key, &val) == ESP_OK) {
+                    cJSON_AddNumberToObject(obj, info.key, (double)val);
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        err = nvs_entry_next(&it);
+    }
+    nvs_release_iterator(it);
+    nvs_close(h);
+
+    *out = obj;
+    return ESP_OK;
+}
+
+esp_err_t nvs_factory_get_str(const char *key, char *buf, size_t *len)
+{
+    /* Factory partition is read-only by design. */
+    esp_err_t err = nvs_flash_init_partition(FACTORY_PARTITION);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Factory partition '%s' init failed: %s",
+                 FACTORY_PARTITION, esp_err_to_name(err));
+        return err;
+    }
+
+    nvs_handle_t h;
+    err = nvs_open_from_partition(FACTORY_PARTITION, FACTORY_NAMESPACE,
+                                  NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Factory NVS open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_get_str(h, key, buf, len);
+    nvs_close(h);
+    return err;
+}
+
+--- END OF FILE ---
+
+--- FILE: ./main/nvs_config.h ---
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+#include "esp_err.h"
+#include "cJSON.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief Initialise the main application NVS namespace.
+ *        Must be called after nvs_flash_init() in app_main.
+ */
+esp_err_t nvs_config_init(void);
+
+/** @brief Read a string value from the application config namespace. */
+esp_err_t nvs_config_get_str(const char *key, char *buf, size_t *len);
+
+/** @brief Write a string value to the application config namespace. */
+esp_err_t nvs_config_set_str(const char *key, const char *value);
+
+/** @brief Read an int32 value from the application config namespace. */
+esp_err_t nvs_config_get_i32(const char *key, int32_t *out);
+
+/** @brief Write an int32 value to the application config namespace. */
+esp_err_t nvs_config_set_i32(const char *key, int32_t value);
+
+/**
+ * @brief Serialise all entries in the application config namespace to a
+ *        cJSON object.  Caller owns the returned object and must call
+ *        cJSON_Delete() on it.
+ *
+ * @param[out] out  Pointer that receives the newly allocated cJSON object.
+ */
+esp_err_t nvs_config_get_all_json(cJSON **out);
+
+/**
+ * @brief Load a string from the factory NVS partition (read-only).
+ *
+ * @param key  NVS key to look up.
+ * @param buf  Destination buffer.
+ * @param len  In: buffer size.  Out: bytes written (including NUL).
+ */
+esp_err_t nvs_factory_get_str(const char *key, char *buf, size_t *len);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END OF FILE ---
+
+--- FILE: ./main/ota_handler.c ---
+#include "ota_handler.h"
+#include "auth.h"
+#include "log_ws.h"
+#include "sdkconfig.h"
+#include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_system.h"
+#include "esp_app_desc.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <stdatomic.h>
+#include "esp_heap_caps.h"
+#include "cJSON.h"
+#include <string.h>
+#include <sys/param.h>
+
+static const char *TAG = "OTA_HANDLER";
+
+#define OTA_BUF_SIZE    CONFIG_PILOT_OTA_BUF_SIZE
+#define OTA_MAX_BYTES   CONFIG_PILOT_OTA_MAX_SIZE_BYTES
+
+/* Atomic progress counters: written by the OTA HTTP handler task,
+ * read by the OTA status handler task. _Atomic guarantees that
+ * concurrent reads on the other core see consistent values. */
+static _Atomic uint32_t s_ota_bytes_received = 0;
+static _Atomic uint32_t s_ota_total_bytes    = 0;
+
+/* ── Internal helpers ───────────────────────────────────────────────────── */
+
+static void broadcast_ota_progress(uint32_t received, uint32_t total)
+{
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf),
+                     "{\"type\":\"ota_progress\",\"bytes\":%"PRIu32",\"total\":%"PRIu32"}",
+                     received, total);
+    if (n > 0 && n < (int)sizeof(buf)) {
+        log_ws_broadcast_json(buf);
+    }
+}
+
+static void delayed_reboot_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_restart();
+}
+
+/* ── POST /api/v1/ota ───────────────────────────────────────────────────── */
+
+static esp_err_t ota_upload_handler(httpd_req_t *req)
+{
+    if (!auth_check_bearer(req)) return ESP_FAIL;
+
+    /* Validate Content-Length. */
+    if (req->content_len == 0 || req->content_len > OTA_MAX_BYTES) {
+        ESP_LOGE(TAG, "Invalid content_len: %zu", req->content_len);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid Content-Length");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "OTA upload started: %zu bytes", req->content_len);
+
+    const esp_partition_t *update_part = esp_ota_get_next_update_partition(NULL);
+    if (!update_part) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition");
+        return ESP_FAIL;
+    }
+
+    esp_ota_handle_t ota_handle = 0;
+    esp_err_t err = esp_ota_begin(update_part, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_begin: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin failed");
+        return ESP_FAIL;
+    }
+
+    /* Allocate receive buffer from PSRAM first, fall back to internal SRAM. */
+    uint8_t *buf = heap_caps_malloc(OTA_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        buf = malloc(OTA_BUF_SIZE);
+    }
+    if (!buf) {
+        esp_ota_abort(ota_handle);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    /* Reset progress counters atomically before starting. */
+    atomic_store(&s_ota_bytes_received, 0);
+    atomic_store(&s_ota_total_bytes, (uint32_t)req->content_len);
+
+    size_t remaining = req->content_len;
+    bool first_chunk = true;
+
+    while (remaining > 0) {
+        int to_read = (int)MIN(remaining, OTA_BUF_SIZE);
+        int received = httpd_req_recv(req, (char *)buf, to_read);
+
+        if (received < 0) {
+            if (received == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            ESP_LOGE(TAG, "Socket receive error");
+            esp_ota_abort(ota_handle);
+            free(buf);
+            /* Response has not been sent yet; send error. */
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Socket error");
+            return ESP_FAIL;
+        }
+
+        /* Validate the firmware magic byte on the first chunk. */
+        if (first_chunk) {
+            if (received < 4 || buf[0] != 0xE9) {
+                ESP_LOGE(TAG, "Invalid firmware magic byte: 0x%02X", buf[0]);
+                esp_ota_abort(ota_handle);
+                free(buf);
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid firmware image");
+                return ESP_FAIL;
+            }
+            first_chunk = false;
+        }
+
+        err = esp_ota_write(ota_handle, buf, received);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_write: %s", esp_err_to_name(err));
+            esp_ota_abort(ota_handle);
+            free(buf);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Flash write error");
+            return ESP_FAIL;
+        }
+
+        remaining                -= (size_t)received;
+        uint32_t prev = atomic_fetch_add(&s_ota_bytes_received, (uint32_t)received);
+        uint32_t curr = prev + (uint32_t)received;
+        uint32_t tot  = atomic_load(&s_ota_total_bytes);
+        /* Throttle WS broadcasts to ~1% steps to avoid flooding the queue. */
+        if (tot > 0) {
+            uint32_t prev_pct = (uint32_t)((uint64_t)prev * 100 / tot);
+            uint32_t curr_pct = (uint32_t)((uint64_t)curr * 100 / tot);
+            if (curr_pct > prev_pct) {
+                broadcast_ota_progress(curr, tot);
+            }
+        }
+    }
+
+    free(buf);
+
+    err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_end: %s", esp_err_to_name(err));
+        /* ota_handle is already invalidated by esp_ota_end on failure. */
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA verify failed");
+        return ESP_FAIL;
+    }
+
+    err = esp_ota_set_boot_partition(update_part);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_set_boot_partition: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Boot partition error");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "OTA complete. Rebooting in 1.5 s...");
+    log_ws_broadcast_json("{\"type\":\"ota_done\",\"status\":\"rebooting\"}");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\",\"message\":\"Update accepted. Rebooting.\"}");
+
+    xTaskCreate(delayed_reboot_task, "ota_reboot", 2048, NULL, 5, NULL);
+    return ESP_OK;
+}
+
+/* ── POST /api/v1/ota/rollback ──────────────────────────────────────────── */
+
+static esp_err_t ota_rollback_handler(httpd_req_t *req)
+{
+    if (!auth_check_bearer(req)) return ESP_FAIL;
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    esp_err_t err = esp_ota_get_state_partition(running, &state);
+    if (err != ESP_OK || state == ESP_OTA_IMG_INVALID) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"No rollback target available\"}");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGW(TAG, "Manual rollback requested.");
+    log_ws_broadcast_json("{\"type\":\"ota_rollback\",\"status\":\"rebooting\"}");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\",\"message\":\"Rolling back. Rebooting.\"}");
+
+    /* Mark the current image invalid and reboot to trigger rollback. */
+    esp_ota_mark_app_invalid_rollback_and_reboot();
+    /* Not reached. */
+    return ESP_OK;
+}
+
+/* ── GET /api/v1/ota/status ─────────────────────────────────────────────── */
+
+static esp_err_t ota_status_handler(httpd_req_t *req)
+{
+    if (!auth_check_bearer(req)) return ESP_FAIL;
+
+    const esp_partition_t   *running  = esp_ota_get_running_partition();
+    const esp_app_desc_t    *desc     = esp_app_get_description();
+    esp_ota_img_states_t     state    = ESP_OTA_IMG_UNDEFINED;
+    esp_ota_get_state_partition(running, &state);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "version",    desc->version);
+    cJSON_AddStringToObject(root, "idf_ver",    desc->idf_ver);
+    cJSON_AddStringToObject(root, "date",       desc->date);
+    cJSON_AddStringToObject(root, "partition",  running->label);
+    cJSON_AddNumberToObject(root, "ota_state",  (double)state);
+
+    /* In-flight progress (non-zero only during an active upload).
+     * atomic_load ensures we see a consistent snapshot. */
+    uint32_t rx  = atomic_load(&s_ota_bytes_received);
+    uint32_t tot = atomic_load(&s_ota_total_bytes);
+    if (tot > 0) {
+        cJSON_AddNumberToObject(root, "progress_bytes", (double)rx);
+        cJSON_AddNumberToObject(root, "progress_total", (double)tot);
+        cJSON_AddNumberToObject(root, "progress_pct",   (double)rx * 100.0 / tot);
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "JSON error");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    free(json);
+    return ESP_OK;
+}
+
+/* ── URI tables ─────────────────────────────────────────────────────────── */
+
+static const httpd_uri_t s_uris[] = {
+    { .uri = "/api/v1/ota",          .method = HTTP_POST, .handler = ota_upload_handler   },
+    { .uri = "/api/v1/ota/rollback", .method = HTTP_POST, .handler = ota_rollback_handler  },
+    { .uri = "/api/v1/ota/status",   .method = HTTP_GET,  .handler = ota_status_handler    },
+};
+
+esp_err_t ota_handler_register(httpd_handle_t server)
+{
+    esp_err_t err = ESP_OK;
+    for (size_t i = 0; i < sizeof(s_uris) / sizeof(s_uris[0]); i++) {
+        err = httpd_register_uri_handler(server, &s_uris[i]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to register %s: %s",
+                     s_uris[i].uri, esp_err_to_name(err));
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
+--- END OF FILE ---
+
+--- FILE: ./main/ota_handler.h ---
+#pragma once
+
+#include "esp_err.h"
+#include "esp_http_server.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief Register OTA-related URI handlers with the HTTPS server.
+ *
+ *  POST /api/v1/ota           – Upload firmware binary (auth required).
+ *  POST /api/v1/ota/rollback  – Roll back to the previous partition (auth required).
+ *  GET  /api/v1/ota/status    – Current OTA state and firmware info (auth required).
+ */
+esp_err_t ota_handler_register(httpd_handle_t server);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END OF FILE ---
+
+--- FILE: ./main/static_handler.c ---
+#include "static_handler.h"
+#include "littlefs_mgr.h"
+#include "esp_log.h"
+#include "esp_heap_caps.h"
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+
+static const char *TAG = "STATIC";
+
+/* ── MIME type table – project-wide SSOT ───────────────────────────────── */
+
+typedef struct { const char *ext; const char *mime; } mime_entry_t;
+
+static const mime_entry_t s_mime_map[] = {
+    { ".html",  "text/html; charset=utf-8"       },
+    { ".css",   "text/css; charset=utf-8"         },
+    { ".js",    "application/javascript"          },
+    { ".json",  "application/json"                },
+    { ".svg",   "image/svg+xml"                   },
+    { ".png",   "image/png"                       },
+    { ".jpg",   "image/jpeg"                      },
+    { ".ico",   "image/x-icon"                    },
+    { ".woff2", "font/woff2"                      },
+    { ".woff",  "font/woff"                       },
+    { ".ttf",   "font/ttf"                        },
+    { ".txt",   "text/plain; charset=utf-8"       },
+    { ".xml",   "application/xml"                 },
+    { ".pdf",   "application/pdf"                 },
+    { NULL,     "application/octet-stream"        },  /* default / sentinel */
+};
+
+/* ── Embedded fallback (web_ui.html via EMBED_TXTFILES) ─────────────────── */
+
+extern const uint8_t web_ui_html_start[] asm("_binary_web_ui_html_start");
+extern const uint8_t web_ui_html_end[]   asm("_binary_web_ui_html_end");
+
+/* ── Internal helpers ───────────────────────────────────────────────────── */
+
+/* Return a pointer to the file extension including the dot, or NULL. */
+static const char *file_ext(const char *name)
+{
+    if (!name) return NULL;
+    const char *dot = strrchr(name, '.');
+    /* Ignore a leading dot (hidden files like ".htaccess"). */
+    return (dot && dot != name) ? dot : NULL;
+}
+
+/* Build a weak ETag from the file size.
+ * NOTE: LittleFS does not populate st_mtime (always 0), so the ETag is
+ * based on file size only.  A content-changing same-size update will NOT
+ * invalidate the cache.  Mitigate by versioning filenames (e.g. app.v2.js)
+ * or by clearing browser cache after a LittleFS partition update. */
+static void make_etag(const struct stat *st, char *buf, size_t len)
+{
+    snprintf(buf, len, "W/\"%lx\"", (unsigned long)st->st_size);
+}
+
+/* Send a single file from the VFS.  Checks for a .gz sibling first. */
+static esp_err_t send_file(httpd_req_t *req, const char *vfs_path,
+                            const char *mime)
+{
+    /* Try pre-compressed variant first. */
+    char gz_path[256];
+    snprintf(gz_path, sizeof(gz_path), "%s.gz", vfs_path);
+
+    struct stat st;
+    bool        use_gz = (stat(gz_path, &st) == 0);
+    const char *path   = use_gz ? gz_path : vfs_path;
+
+    if (!use_gz && stat(vfs_path, &st) != 0) {
+        ESP_LOGW(TAG, "File not found: %s", vfs_path);
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not found");
+        return ESP_FAIL;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Open failed");
+        return ESP_FAIL;
+    }
+
+    /* Headers. */
+    httpd_resp_set_type(req, mime);
+    if (use_gz) {
+        httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    }
+
+    char etag[40];
+    make_etag(&st, etag, sizeof(etag));
+    httpd_resp_set_hdr(req, "ETag", etag);
+
+    /* Cache strategy: HTML always revalidated; static assets cached 24 h.
+     * IMPORTANT: use vfs_path (not path) for extension detection because
+     * path may point to the .gz variant – file_ext(".gz") would wrongly
+     * return "no-cache" for all pre-compressed assets. */
+    const char *ext = file_ext(vfs_path);
+    bool is_static = ext && (
+        strcasecmp(ext, ".js")    == 0 ||
+        strcasecmp(ext, ".css")   == 0 ||
+        strcasecmp(ext, ".ico")   == 0 ||
+        strcasecmp(ext, ".png")   == 0 ||
+        strcasecmp(ext, ".jpg")   == 0 ||
+        strcasecmp(ext, ".woff2") == 0 ||
+        strcasecmp(ext, ".woff")  == 0 ||
+        strcasecmp(ext, ".ttf")   == 0
+    );
+    httpd_resp_set_hdr(req, "Cache-Control",
+                       is_static ? "public, max-age=86400" : "no-cache");
+
+    /* Stream file in PSRAM-backed chunks. */
+    const size_t CHUNK = 4096;
+    uint8_t *buf = heap_caps_malloc(CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) buf = malloc(CHUNK);
+    if (!buf) {
+        fclose(f);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    size_t n;
+    esp_err_t err = ESP_OK;
+    while ((n = fread(buf, 1, CHUNK, f)) > 0) {
+        if (httpd_resp_send_chunk(req, (const char *)buf, (ssize_t)n) != ESP_OK) {
+            err = ESP_FAIL;
+            break;
+        }
+    }
+    free(buf);
+    fclose(f);
+
+    if (err == ESP_OK) {
+        httpd_resp_send_chunk(req, NULL, 0); /* End chunked response. */
+    }
+    return err;
+}
+
+/* ── URI handlers ───────────────────────────────────────────────────────── */
+
+/* GET /favicon.ico – return 204 No Content if no file exists in LittleFS.
+ * Prevents the browser from generating a 404 log entry on every page load. */
+static esp_err_t favicon_handler(httpd_req_t *req)
+{
+    if (littlefs_mgr_is_mounted()) {
+        char path[128];
+        snprintf(path, sizeof(path), "%s/favicon.ico", littlefs_mgr_base_path());
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            return send_file(req, path, "image/x-icon");
+        }
+    }
+    /* No favicon available – respond with 204 to suppress browser retries. */
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+/* GET /  – tries LittleFS index.html, falls back to embedded web_ui.html. */
+static esp_err_t root_handler(httpd_req_t *req)
+{
+    if (littlefs_mgr_is_mounted()) {
+        char path[128];
+        snprintf(path, sizeof(path), "%s/index.html",
+                 littlefs_mgr_base_path());
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            return send_file(req, path, "text/html; charset=utf-8");
+        }
+        ESP_LOGW(TAG, "LittleFS mounted but index.html missing – using fallback.");
+    }
+
+    /* Embedded fallback. */
+    ESP_LOGI(TAG, "Serving embedded fallback web_ui.html.");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_send(req,
+                    (const char *)web_ui_html_start,
+                    (ssize_t)(web_ui_html_end - web_ui_html_start));
+    return ESP_OK;
+}
+
+/* Serves any static asset from LittleFS (wildcard). */
+static esp_err_t static_file_handler(httpd_req_t *req)
+{
+    if (!littlefs_mgr_is_mounted()) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"Filesystem not available\"}");
+        return ESP_FAIL;
+    }
+
+    /* Build the VFS path: /www<uri>  (uri already starts with '/'). */
+    /* URI can be up to 512 bytes; base_path is short. 520 is sufficient. */
+    char path[520];
+    snprintf(path, sizeof(path), "%s%s",
+             littlefs_mgr_base_path(), req->uri);
+
+    /* Strip query string if present. */
+    char *q = strchr(path, '?');
+    if (q) *q = '\0';
+
+    const char *mime = static_handler_mime(path);
+    return send_file(req, path, mime);
+}
+
+/* httpd requires a wildcard URI for catch-all; registered with is_uri_match_wildcard. */
+static const httpd_uri_t s_favicon_uri = {
+    .uri     = "/favicon.ico",
+    .method  = HTTP_GET,
+    .handler = favicon_handler,
+};
+
+static const httpd_uri_t s_root_uri = {
+    .uri     = "/",
+    .method  = HTTP_GET,
+    .handler = root_handler,
+};
+
+static const httpd_uri_t s_static_uri = {
+    .uri     = "/*",
+    .method  = HTTP_GET,
+    .handler = static_file_handler,
+};
+
+/* ── Public API ─────────────────────────────────────────────────────────── */
+
+const char *static_handler_mime(const char *filename)
+{
+    if (!filename) return s_mime_map[0].mime; /* octet-stream sentinel */
+    const char *ext = file_ext(filename);
+    if (!ext) goto fallback;
+
+    for (const mime_entry_t *m = s_mime_map; m->ext != NULL; m++) {
+        if (strcasecmp(ext, m->ext) == 0) return m->mime;
+    }
+fallback:
+    /* Last entry in the table is the catch-all. */
+    return s_mime_map[sizeof(s_mime_map) / sizeof(s_mime_map[0]) - 1].mime;
+}
+
+esp_err_t static_handler_register(httpd_handle_t server)
+{
+    esp_err_t err;
+    err = httpd_register_uri_handler(server, &s_favicon_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register '/favicon.ico': %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &s_root_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register '/': %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &s_static_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register '/*': %s", esp_err_to_name(err));
+        return err;
+    }
+    return ESP_OK;
+}
+
+--- END OF FILE ---
+
+--- FILE: ./main/static_handler.h ---
+#pragma once
+
+#include "esp_err.h"
+#include "esp_http_server.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @file static_handler.h
+ * @brief Single owner of static asset serving and the MIME type table.
+ *
+ * SSOT responsibilities:
+ *  - MIME type mapping (defined once in static_handler.c, nowhere else).
+ *  - Serving logic: LittleFS first, embedded fallback for "/".
+ *  - ETag generation and cache control headers.
+ *  - Pre-compressed (.gz) variant selection.
+ *
+ * Endpoint registered: GET /  and  GET /wildcard
+ */
+
+/**
+ * @brief Register the static file handler with the HTTPS server.
+ *
+ *        When the LittleFS filesystem is mounted:
+ *          GET /         → serves BASE_PATH/index.html
+ *          GET /app.js   → serves BASE_PATH/app.js
+ *          GET /any      → serves BASE_PATH/<uri>
+ *          For each file, checks for a pre-compressed BASE_PATH/<file>.gz first.
+ *
+ *        Fallback (LittleFS not mounted or file not found for "/"):
+ *          GET /         → serves the embedded web_ui.html (EMBED_TXTFILES).
+ *
+ * @param server  Handle of the running HTTPS server.
+ */
+esp_err_t static_handler_register(httpd_handle_t server);
+
+/**
+ * @brief Look up the MIME type string for a file extension.
+ *
+ *        This is the project-wide SSOT for MIME types.  Other modules
+ *        that need MIME strings (e.g. a future download endpoint) must
+ *        call this function rather than defining their own mapping.
+ *
+ * @param filename  Full filename or path (e.g. "index.html", "/app.js").
+ * @return          Pointer to a static MIME string, or "application/octet-stream"
+ *                  if the extension is unknown.
+ */
+const char *static_handler_mime(const char *filename);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END OF FILE ---
+
+--- FILE: ./main/system_handler.c ---
+#include "system_handler.h"
+#include "auth.h"
+#include "littlefs_mgr.h"
+#include "sdkconfig.h"
+#include "esp_log.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_netif.h"
+#include "esp_wifi.h"
+#include "esp_app_desc.h"
+#include "esp_heap_caps.h"
+#include "cJSON.h"
+#include <inttypes.h>
+
+static const char *TAG = "SYS_HANDLER";
+
+static esp_err_t system_get_handler(httpd_req_t *req)
+{
+    if (!auth_check_bearer(req)) return ESP_FAIL;
+
+    const esp_app_desc_t *desc = esp_app_get_description();
+
+    /* Wi-Fi info. */
+    char    ip_str[24] = "N/A";
+    int8_t  rssi       = 0;
+    esp_netif_t *sta   = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta) {
+        esp_netif_ip_info_t ip;
+        if (esp_netif_get_ip_info(sta, &ip) == ESP_OK) {
+            snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&ip.ip));
+        }
+    }
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) rssi = ap.rssi;
+
+    uint64_t uptime_s = (uint64_t)(esp_timer_get_time() / 1000000ULL);
+
+    /* LittleFS usage (optional – zero if not mounted). */
+    size_t lfs_total = 0, lfs_used = 0;
+    if (littlefs_mgr_is_mounted()) {
+        littlefs_mgr_stat(&lfs_total, &lfs_used);
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "fw_version",   desc->version);
+    cJSON_AddStringToObject(root, "idf_version",  desc->idf_ver);
+    cJSON_AddStringToObject(root, "compile_date", desc->date);
+    cJSON_AddStringToObject(root, "ip",           ip_str);
+    cJSON_AddNumberToObject(root, "rssi_dbm",     (double)rssi);
+    cJSON_AddNumberToObject(root, "uptime_s",     (double)uptime_s);
+    cJSON_AddNumberToObject(root, "free_heap",    (double)esp_get_free_heap_size());
+    cJSON_AddNumberToObject(root, "min_heap",     (double)esp_get_minimum_free_heap_size());
+    cJSON_AddNumberToObject(root, "free_psram",   (double)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    cJSON_AddNumberToObject(root, "lfs_total",    (double)lfs_total);
+    cJSON_AddNumberToObject(root, "lfs_used",     (double)lfs_used);
+    cJSON_AddBoolToObject  (root, "lfs_mounted",  littlefs_mgr_is_mounted());
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "JSON error");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    free(json);
+    return ESP_OK;
+}
+
+static const httpd_uri_t s_uri = {
+    .uri     = "/api/v1/system",
+    .method  = HTTP_GET,
+    .handler = system_get_handler,
+};
+
+esp_err_t system_handler_register(httpd_handle_t server)
+{
+    esp_err_t err = httpd_register_uri_handler(server, &s_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+--- END OF FILE ---
+
+--- FILE: ./main/system_handler.h ---
+#pragma once
+
+#include "esp_err.h"
+#include "esp_http_server.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @file system_handler.h
+ * @brief Single responsibility: system telemetry REST endpoint.
+ *
+ * Endpoint: GET /api/v1/system
+ * Response: JSON with heap, PSRAM, uptime, IP, RSSI, firmware version,
+ *           LittleFS usage.
+ * Auth: Bearer token required.
+ */
+esp_err_t system_handler_register(httpd_handle_t server);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END OF FILE ---
+
+--- FILE: ./main/web_server.c ---
+#include "web_server.h"
+#include "littlefs_mgr.h"
+#include "static_handler.h"
+#include "system_handler.h"
+#include "config_handler.h"
+#include "ota_handler.h"
+#include "log_ws.h"
+#include "sdkconfig.h"
+#include "esp_log.h"
+#include "esp_https_server.h"
+
+static const char *TAG = "WEB_SERVER";
+
+/* Embedded TLS credentials. */
+extern const uint8_t server_cert_pem_start[] asm("_binary_server_crt_start");
+extern const uint8_t server_cert_pem_end[]   asm("_binary_server_crt_end");
+extern const uint8_t server_key_pem_start[]  asm("_binary_server_key_start");
+extern const uint8_t server_key_pem_end[]    asm("_binary_server_key_end");
+
+static httpd_handle_t s_server = NULL;
+
+/* ── Route table – SSOT for all URI registrations ───────────────────────── */
+/*
+ * Every endpoint in this project is registered exactly once, here.
+ * Adding a new endpoint means adding one call in this function only.
+ * Handlers own their URI strings; this function owns the registration order.
+ */
+static esp_err_t register_all_handlers(httpd_handle_t server)
+{
+    esp_err_t err = ESP_OK;
+
+    /* API handlers – registered before the wildcard static handler. */
+    err |= system_handler_register(server);
+    err |= config_handler_register(server);
+    err |= ota_handler_register(server);
+    err |= log_ws_register(server);
+
+    /* Static file handler - must be last; the wildcard catches all paths. */
+    err |= static_handler_register(server);
+
+    return err;
+}
+
+/* ── Public API ─────────────────────────────────────────────────────────── */
+
+esp_err_t web_server_start(void)
+{
+    if (s_server) {
+        ESP_LOGW(TAG, "Server already running.");
+        return ESP_OK;
+    }
+
+    /* Mount LittleFS before starting the server so static_handler can serve
+     * files immediately on the first request. */
+    esp_err_t lfs_err = littlefs_mgr_init();
+    if (lfs_err != ESP_OK) {
+        ESP_LOGW(TAG, "LittleFS unavailable – static files will use fallback.");
+    }
+
+    httpd_ssl_config_t cfg = HTTPD_SSL_CONFIG_DEFAULT();
+    cfg.servercert     = server_cert_pem_start;
+    cfg.servercert_len = (size_t)(server_cert_pem_end - server_cert_pem_start);
+    cfg.prvtkey_pem    = server_key_pem_start;
+    cfg.prvtkey_len    = (size_t)(server_key_pem_end - server_key_pem_start);
+
+    cfg.port_secure             = CONFIG_PILOT_HTTPS_PORT;
+    cfg.httpd.stack_size        = 12288;
+    cfg.httpd.max_uri_handlers  = 16;
+    /* With TLS session tickets enabled, the browser reuses existing sessions
+     * instead of opening new ones. 5 sockets: 1 persistent WS + 4 HTTP. */
+    cfg.httpd.max_open_sockets  = 5;
+    cfg.httpd.lru_purge_enable  = true;
+    cfg.httpd.recv_wait_timeout = 30;
+    cfg.httpd.send_wait_timeout = 10;
+    /* IDF 6.0: session_tickets is now supported on ESP32-S3.
+     * After the first full TLS handshake the server issues a ticket;
+     * reconnects skip RSA key exchange and resume in ~50 ms instead of ~1 s. */
+    cfg.session_tickets = true;
+
+    /* Enable wildcard URI matching for the static file handler. */
+    cfg.httpd.uri_match_fn = httpd_uri_match_wildcard;
+
+    ESP_LOGI(TAG, "Starting HTTPS server on port %d", CONFIG_PILOT_HTTPS_PORT);
+    esp_err_t err = httpd_ssl_start(&s_server, &cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_ssl_start failed: %s", esp_err_to_name(err));
+        littlefs_mgr_deinit();
+        return err;
+    }
+
+    err = register_all_handlers(s_server);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Handler registration failed – stopping server.");
+        httpd_ssl_stop(s_server);
+        s_server = NULL;
+        littlefs_mgr_deinit();
+        return err;
+    }
+
+    ESP_LOGI(TAG, "HTTPS server ready.%s",
+             littlefs_mgr_is_mounted() ? " LittleFS active." : " LittleFS fallback.");
+    return ESP_OK;
+}
+
+esp_err_t web_server_stop(void)
+{
+    if (!s_server) return ESP_OK;
+    esp_err_t err = httpd_ssl_stop(s_server);
+    s_server = NULL;
+    littlefs_mgr_deinit();
+    return err;
+}
+
+--- END OF FILE ---
+
+--- FILE: ./main/web_server.h ---
+#pragma once
+
+#include "esp_err.h"
+#include "esp_http_server.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief Start the HTTPS server and register all URI handlers.
+ *
+ *        TLS certificate and private key are embedded in flash via
+ *        EMBED_TXTFILES (see CMakeLists.txt).
+ *
+ *        Registers: /, /api/v1/system, /api/v1/config (GET+POST),
+ *                   /api/v1/ota, /api/v1/ota/rollback,
+ *                   /api/v1/ota/status, /ws/log.
+ */
+esp_err_t web_server_start(void);
+
+/**
+ * @brief Stop the HTTPS server (e.g. before entering sleep or on disconnect).
+ */
+esp_err_t web_server_stop(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END OF FILE ---
+
+--- FILE: ./main/web_ui.html ---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32-S3 Pilot Dashboard</title>
+<style>
+  :root {
+    --bg:      #0f1117;
+    --surface: #1a1d27;
+    --card:    #20232f;
+    --border:  #2e3244;
+    --accent:  #4f8ef7;
+    --accent2: #6ee7b7;
+    --danger:  #f87171;
+    --warn:    #fbbf24;
+    --text:    #e2e8f0;
+    --muted:   #64748b;
+    --mono:    'JetBrains Mono', 'Fira Code', monospace;
+    --radius:  10px;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+
+  /* ── Layout ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: .02em; }
+  header .status-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--muted); display: inline-block;
+    margin-right: 8px; transition: background .4s;
+  }
+  header .status-dot.ok  { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+  header .status-dot.err { background: var(--danger); }
+  header .right { display: flex; align-items: center; gap: 16px; }
+
+  #token-input-wrap {
+    display: flex; gap: 8px; align-items: center;
+  }
+  #token-input-wrap input {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 10px; color: var(--text);
+    font-size: 13px; width: 240px;
+  }
+  #token-input-wrap input:focus { outline: none; border-color: var(--accent); }
+
+  .main-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto;
+    gap: 20px;
+    padding: 24px;
+    flex: 1;
+  }
+  @media (max-width: 900px) {
+    .main-grid { grid-template-columns: 1fr; }
+  }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .card-title {
+    font-size: 12px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .card.span2 { grid-column: span 2; }
+  @media (max-width: 900px) { .card.span2 { grid-column: span 1; } }
+
+  /* ── System info grid ── */
+  .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 20px;
+  }
+  .info-item label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 2px; }
+  .info-item span  { font-size: 15px; font-weight: 500; }
+  .info-item .mono { font-family: var(--mono); font-size: 13px; }
+
+  /* ── Progress bar ── */
+  .progress-wrap { display: none; flex-direction: column; gap: 6px; }
+  .progress-wrap.visible { display: flex; }
+  .progress-bar-bg {
+    height: 8px; background: var(--border); border-radius: 4px; overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%; background: var(--accent); border-radius: 4px;
+    width: 0%; transition: width .3s ease;
+  }
+  .progress-label { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; }
+
+  /* ── Buttons ── */
+  .btn {
+    padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500;
+    cursor: pointer; border: none; transition: opacity .15s, transform .1s;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary  { background: var(--accent); color: #fff; }
+  .btn-danger   { background: var(--danger); color: #fff; }
+  .btn-ghost    { background: var(--border); color: var(--text); }
+  .btn-sm       { padding: 5px 10px; font-size: 12px; }
+
+  /* ── OTA drop zone ── */
+  #drop-zone {
+    border: 2px dashed var(--border); border-radius: var(--radius);
+    padding: 36px 20px; text-align: center; cursor: pointer;
+    transition: border-color .2s, background .2s; position: relative;
+  }
+  #drop-zone.drag { border-color: var(--accent); background: rgba(79,142,247,.06); }
+  #drop-zone.has-file { border-color: var(--accent2); background: rgba(110,231,183,.06); }
+  #drop-zone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  #drop-zone p   { color: var(--muted); font-size: 13px; pointer-events: none; }
+  #drop-zone strong { color: var(--text); }
+  #file-name { font-size: 12px; color: var(--accent2); margin-top: 4px; }
+
+  /* ── OTA status message ── */
+  #ota-status {
+    font-size: 13px; padding: 8px 12px; border-radius: 6px;
+    display: none; margin-top: 4px;
+  }
+  #ota-status.ok   { background: rgba(110,231,183,.12); color: var(--accent2); display: block; }
+  #ota-status.err  { background: rgba(248,113,113,.12); color: var(--danger);  display: block; }
+  #ota-status.info { background: rgba(79,142,247,.12);  color: var(--accent);  display: block; }
+
+  /* ── OTA version strip ── */
+  .ota-meta { display: flex; gap: 16px; flex-wrap: wrap; }
+  .ota-meta .chip {
+    font-size: 11px; padding: 3px 10px; border-radius: 20px;
+    background: var(--border); color: var(--muted); font-family: var(--mono);
+  }
+  .ota-meta .chip span { color: var(--text); }
+
+  /* ── Config editor ── */
+  #config-table { width: 100%; border-collapse: collapse; }
+  #config-table th, #config-table td {
+    text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  #config-table th { font-size: 11px; color: var(--muted); font-weight: 600; }
+  #config-table td input {
+    background: transparent; border: none; color: var(--text);
+    font-family: var(--mono); font-size: 13px; width: 100%;
+    padding: 2px 4px; border-radius: 4px;
+  }
+  #config-table td input:focus {
+    outline: none; background: var(--border);
+  }
+  #config-table tr:last-child td { border-bottom: none; }
+  .config-save-btn {
+    font-size: 11px; padding: 3px 8px; border-radius: 4px;
+    background: var(--accent); color: #fff; border: none; cursor: pointer;
+    display: none; margin-left: 6px;
+  }
+  #config-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 20px 0; }
+  .new-key-row { display: flex; gap: 8px; align-items: center; }
+  .new-key-row input {
+    background: var(--border); border: none; border-radius: 6px;
+    padding: 6px 10px; color: var(--text); font-size: 13px; flex: 1;
+  }
+  .new-key-row input:focus { outline: 1px solid var(--accent); }
+
+  /* ── Log console ── */
+  #log-console {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.6;
+    background: #0b0d14;
+    border-radius: 6px;
+    padding: 12px 14px;
+    height: 340px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  #log-console .l-I { color: #94a3b8; }
+  #log-console .l-W { color: var(--warn); }
+  #log-console .l-E { color: var(--danger); }
+  #log-console .l-D { color: #475569; }
+  .log-controls { display: flex; gap: 8px; align-items: center; }
+  #ws-status { font-size: 11px; color: var(--muted); }
+  #ws-status.connected { color: var(--accent2); }
+  .log-auto { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-left: auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="status-dot" id="conn-dot"></span>ESP32-S3 Pilot Dashboard</h1>
+  <div class="right">
+    <div id="token-input-wrap">
+      <input type="password" id="token-input" placeholder="API token" autocomplete="off">
+      <button class="btn btn-ghost btn-sm" onclick="saveToken()">Connect</button>
+    </div>
+  </div>
+</header>
+
+<div class="main-grid">
+
+  <!-- ── System Info ───────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-title">
+      System info
+      <button class="btn btn-ghost btn-sm" onclick="loadSystem()">Refresh</button>
+    </div>
+    <div class="info-grid" id="sys-grid">
+      <div class="info-item"><label>Firmware</label><span id="s-fw">—</span></div>
+      <div class="info-item"><label>IDF version</label><span id="s-idf">—</span></div>
+      <div class="info-item"><label>IP address</label><span class="mono" id="s-ip">—</span></div>
+      <div class="info-item"><label>Wi-Fi RSSI</label><span id="s-rssi">—</span></div>
+      <div class="info-item"><label>Uptime</label><span id="s-uptime">—</span></div>
+      <div class="info-item"><label>Free heap</label><span id="s-heap">—</span></div>
+      <div class="info-item"><label>Min heap</label><span id="s-mheap">—</span></div>
+      <div class="info-item"><label>Free PSRAM</label><span id="s-psram">—</span></div>
+    </div>
+  </div>
+
+  <!-- ── OTA Upload ────────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-title">OTA firmware update</div>
+
+    <div class="ota-meta" id="ota-meta"></div>
+
+    <div id="drop-zone">
+      <input type="file" id="fw-file" accept=".bin">
+      <p>Drag &amp; drop <strong>.bin</strong> file here<br>or click to browse</p>
+      <div id="file-name"></div>
+    </div>
+
+    <div class="progress-wrap" id="prog-wrap">
+      <div class="progress-bar-bg"><div class="progress-bar-fill" id="prog-fill"></div></div>
+      <div class="progress-label"><span id="prog-bytes">0 B</span><span id="prog-pct">0%</span></div>
+    </div>
+
+    <div id="ota-status"></div>
+
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      <button class="btn btn-primary" id="btn-upload" onclick="startOta()" disabled>Upload firmware</button>
+      <button class="btn btn-danger"  id="btn-rollback" onclick="rollback()">Rollback</button>
+    </div>
+  </div>
+
+  <!-- ── Config Editor ─────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-title">
+      Device configuration
+      <button class="btn btn-ghost btn-sm" onclick="loadConfig()">Refresh</button>
+    </div>
+    <div style="overflow-x:auto;">
+      <table id="config-table">
+        <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+        <tbody id="config-body"></tbody>
+      </table>
+      <div id="config-empty">Loading…</div>
+    </div>
+    <div class="new-key-row">
+      <input type="text"  id="new-key"   placeholder="key">
+      <input type="text"  id="new-val"   placeholder="value">
+      <button class="btn btn-primary btn-sm" onclick="addConfigEntry()">Add</button>
+    </div>
+  </div>
+
+  <!-- ── Log Console ───────────────────────────────────────────── -->
+  <div class="card span2">
+    <div class="card-title">
+      Live log stream
+      <div class="log-controls">
+        <span id="ws-status">Disconnected</span>
+        <button class="btn btn-ghost btn-sm" onclick="connectWs()">Connect WS</button>
+        <button class="btn btn-ghost btn-sm" onclick="clearLog()">Clear</button>
+        <label class="log-auto">
+          <input type="checkbox" id="chk-scroll" checked> Auto-scroll
+        </label>
+      </div>
+    </div>
+    <div id="log-console"></div>
+  </div>
+
+</div><!-- /main-grid -->
+
+<script>
+'use strict';
+
+/* ── State ── */
+let token = localStorage.getItem('pilot_token') || '';
+if (token) document.getElementById('token-input').value = token;
+
+let ws        = null;
+let wsRetry   = null;
+let logLines  = 0;
+const MAX_LOG = 500;
+
+/* ── Token ── */
+function saveToken() {
+  token = document.getElementById('token-input').value.trim();
+  localStorage.setItem('pilot_token', token);
+  setDot('ok');
+  loadAll();
+}
+
+/* ── Utilities ── */
+function setDot(state) {
+  const d = document.getElementById('conn-dot');
+  d.className = 'status-dot ' + (state || '');
+}
+
+function fmtBytes(b) {
+  if (b < 1024)       return b + ' B';
+  if (b < 1048576)    return (b/1024).toFixed(1) + ' KB';
+  return                     (b/1048576).toFixed(2) + ' MB';
+}
+
+function fmtUptime(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return `${h}h ${m}m ${sec}s`;
+}
+
+async function apiFetch(path, opts = {}) {
+  opts.headers = Object.assign({ 'Authorization': 'Bearer ' + token }, opts.headers || {});
+  const r = await fetch(path, opts);
+  if (r.status === 401) { setDot('err'); throw new Error('Unauthorized'); }
+  return r;
+}
+
+/* ── System info ── */
+async function loadSystem() {
+  try {
+    const r = await apiFetch('/api/v1/system');
+    const d = await r.json();
+    document.getElementById('s-fw').textContent    = d.fw_version   || '—';
+    document.getElementById('s-idf').textContent   = d.idf_version  || '—';
+    document.getElementById('s-ip').textContent    = d.ip           || '—';
+    document.getElementById('s-rssi').textContent  = d.rssi_dbm != null ? d.rssi_dbm + ' dBm' : '—';
+    document.getElementById('s-uptime').textContent= d.uptime_s != null ? fmtUptime(d.uptime_s) : '—';
+    document.getElementById('s-heap').textContent  = d.free_heap != null ? fmtBytes(d.free_heap) : '—';
+    document.getElementById('s-mheap').textContent = d.min_heap  != null ? fmtBytes(d.min_heap)  : '—';
+    document.getElementById('s-psram').textContent = d.free_psram!= null ? fmtBytes(d.free_psram): '—';
+    setDot('ok');
+  } catch (e) { setDot('err'); }
+}
+
+/* ── OTA status / meta ── */
+async function loadOtaStatus() {
+  try {
+    const r = await apiFetch('/api/v1/ota/status');
+    const d = await r.json();
+    const meta = document.getElementById('ota-meta');
+    const states = ['undefined','pending_verify','valid','invalid','aborted','new'];
+    meta.innerHTML =
+      `<span class="chip">v<span>${d.version||'?'}</span></span>` +
+      `<span class="chip">partition: <span>${d.partition||'?'}</span></span>` +
+      `<span class="chip">state: <span>${states[d.ota_state]||d.ota_state}</span></span>` +
+      `<span class="chip">built: <span>${d.date||'?'}</span></span>`;
+  } catch(_) {}
+}
+
+/* ── OTA upload ── */
+document.getElementById('fw-file').addEventListener('change', function() {
+  const f = this.files[0];
+  if (!f) return;
+  document.getElementById('file-name').textContent = f.name + ' (' + fmtBytes(f.size) + ')';
+  document.getElementById('drop-zone').classList.add('has-file');
+  document.getElementById('btn-upload').disabled = false;
+});
+
+const dz = document.getElementById('drop-zone');
+dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('drag'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+dz.addEventListener('drop', e => {
+  e.preventDefault(); dz.classList.remove('drag');
+  const f = e.dataTransfer.files[0];
+  if (!f || !f.name.endsWith('.bin')) return;
+  const dt = new DataTransfer(); dt.items.add(f);
+  document.getElementById('fw-file').files = dt.files;
+  document.getElementById('fw-file').dispatchEvent(new Event('change'));
+});
+
+function setOtaStatus(msg, type) {
+  const el = document.getElementById('ota-status');
+  el.textContent  = msg;
+  el.className    = type;
+}
+
+function setProg(rx, total) {
+  const pct = total > 0 ? Math.round(rx / total * 100) : 0;
+  document.getElementById('prog-fill').style.width    = pct + '%';
+  document.getElementById('prog-bytes').textContent   = fmtBytes(rx) + ' / ' + fmtBytes(total);
+  document.getElementById('prog-pct').textContent     = pct + '%';
+}
+
+async function startOta() {
+  const file = document.getElementById('fw-file').files[0];
+  if (!file) return;
+
+  const btn = document.getElementById('btn-upload');
+  btn.disabled = true;
+  document.getElementById('prog-wrap').classList.add('visible');
+  setProg(0, file.size);
+  setOtaStatus('Uploading firmware…', 'info');
+
+  try {
+    const r = await apiFetch('/api/v1/ota', {
+      method: 'POST',
+      headers: {
+        'Content-Type':   'application/octet-stream',
+        'Content-Length': file.size,
+      },
+      body: file,
+      duplex: 'half',
+    });
+    if (r.ok) {
+      setOtaStatus('Upload accepted. Device rebooting…', 'ok');
+      setProg(file.size, file.size);
+    } else {
+      const t = await r.text();
+      setOtaStatus('Error: ' + t, 'err');
+      btn.disabled = false;
+    }
+  } catch (e) {
+    setOtaStatus('Network error: ' + e.message, 'err');
+    btn.disabled = false;
+  }
+}
+
+async function rollback() {
+  if (!confirm('Roll back to the previous firmware and reboot?')) return;
+  try {
+    const r = await apiFetch('/api/v1/ota/rollback', { method: 'POST' });
+    const d = await r.json();
+    setOtaStatus(d.message || 'Rollback initiated.', r.ok ? 'ok' : 'err');
+  } catch (e) {
+    setOtaStatus('Rollback error: ' + e.message, 'err');
+  }
+}
+
+/* ── WebSocket log – update progress from WS messages too ── */
+function connectWs() {
+  if (ws && ws.readyState < 2) ws.close();
+  if (wsRetry) { clearTimeout(wsRetry); wsRetry = null; }
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url   = `${proto}://${location.host}/ws/log?token=${encodeURIComponent(token)}`;
+  ws = new WebSocket(url);
+
+  const statusEl = document.getElementById('ws-status');
+  ws.onopen  = () => { statusEl.textContent = 'Connected'; statusEl.className = 'connected'; };
+  ws.onclose = () => {
+    statusEl.textContent = 'Disconnected'; statusEl.className = '';
+    wsRetry = setTimeout(connectWs, 5000);
+  };
+  ws.onerror = () => {};
+
+  ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'log') {
+        appendLog(msg.msg);
+      } else if (msg.type === 'ota_progress') {
+        setProg(msg.bytes, msg.total);
+        document.getElementById('prog-wrap').classList.add('visible');
+      } else if (msg.type === 'ota_done') {
+        setOtaStatus('OTA complete – rebooting…', 'ok');
+      } else if (msg.type === 'ota_rollback') {
+        setOtaStatus('Rollback – rebooting…', 'info');
+      }
+    } catch (_) { appendLog(ev.data); }
+  };
+}
+
+function appendLog(line) {
+  const con  = document.getElementById('log-console');
+  const span = document.createElement('span');
+
+  /* Colour by ESP-IDF log level character: I, W, E, D */
+  const lvl  = line.match(/\b([IWED])\s*\(/)?.[1] || 'I';
+  span.className = 'l-' + lvl;
+  span.textContent = line + '\n';
+  con.appendChild(span);
+
+  /* Trim oldest lines to keep memory bounded. */
+  logLines++;
+  if (logLines > MAX_LOG) {
+    con.firstChild && con.removeChild(con.firstChild);
+    logLines--;
+  }
+
+  if (document.getElementById('chk-scroll').checked) {
+    con.scrollTop = con.scrollHeight;
+  }
+}
+
+function clearLog() {
+  document.getElementById('log-console').innerHTML = '';
+  logLines = 0;
+}
+
+/* ── Config editor ── */
+let configData = {};
+
+async function loadConfig() {
+  document.getElementById('config-empty').textContent = 'Loading…';
+  try {
+    const r = await apiFetch('/api/v1/config');
+    configData = await r.json();
+    renderConfig();
+  } catch (e) {
+    document.getElementById('config-empty').textContent = 'Load failed.';
+  }
+}
+
+function renderConfig() {
+  const tbody = document.getElementById('config-body');
+  tbody.innerHTML = '';
+  const keys = Object.keys(configData);
+  document.getElementById('config-empty').style.display = keys.length ? 'none' : 'block';
+  if (!keys.length) return;
+
+  keys.forEach(k => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${k}</td>
+      <td><input type="text" value="${configData[k]}" data-key="${k}" onchange="markDirty(this)"></td>
+      <td><button class="config-save-btn" data-key="${k}" onclick="saveConfig(this)">Save</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function markDirty(input) {
+  const key = input.dataset.key;
+  const btn = input.parentElement.nextElementSibling.querySelector('button');
+  btn.style.display = 'inline-block';
+}
+
+async function saveConfig(btn) {
+  const key = btn.dataset.key;
+  const input = btn.closest('tr').querySelector('input');
+  const raw   = input.value;
+  const value = isNaN(raw) ? raw : Number(raw);
+
+  try {
+    const r = await apiFetch('/api/v1/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value }),
+    });
+    if (r.ok) { btn.style.display = 'none'; btn.textContent = 'Saved'; }
+    else setOtaStatus('Config write failed.', 'err');
+  } catch (e) { setOtaStatus('Config write error: ' + e.message, 'err'); }
+}
+
+async function addConfigEntry() {
+  const key = document.getElementById('new-key').value.trim();
+  const raw = document.getElementById('new-val').value.trim();
+  if (!key || !raw) return;
+  const value = isNaN(raw) ? raw : Number(raw);
+  try {
+    await apiFetch('/api/v1/config', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ key, value }),
+    });
+    document.getElementById('new-key').value = '';
+    document.getElementById('new-val').value = '';
+    loadConfig();
+  } catch (e) { setOtaStatus('Add failed: ' + e.message, 'err'); }
+}
+
+/* ── Auto-refresh system info every 30 s ── */
+function loadAll() {
+  loadSystem();
+  loadOtaStatus();
+  loadConfig();
+  connectWs();
+}
+
+setInterval(loadSystem, 30000);
+
+/* ── Boot ── */
+if (token) loadAll();
+</script>
+</body>
+</html>
+
+--- END OF FILE ---
+
+--- FILE: ./main/wifi_manager.c ---
+#include "esp_event.h"
+#include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_netif.h"
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "nvs_config.h"
+#include "sdkconfig.h"
+/* IDF 6.0: wifi_provisioning removed; use network_provisioning managed component. */
+#include "esp_srp.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
+#include "network_provisioning/manager.h"
+#include "network_provisioning/scheme_ble.h"
+#include <string.h>
+
+#include "wifi_manager.h"
+
+static const char *TAG = "WIFI_MGR";
+
+#define WIFI_CONNECTED_BIT BIT0
+
+static wifi_connected_cb_t    s_on_connect    = NULL;
+static wifi_disconnected_cb_t s_on_disconnect = NULL;
+
+static EventGroupHandle_t s_wifi_eg;
+static char               s_ip_str[24] = {0};
+static bool               s_connected  = false;
+
+static char s_device_id[48]   = {0};
+
+/* SRP6a buffers – int * matches esp_srp_gen_salt_verifier() signature.
+ * salt_len is an INPUT to esp_srp_gen_salt_verifier(), not a pointer. */
+static char *s_srp_salt     = NULL;
+static char *s_srp_verifier = NULL;
+static int   s_srp_ver_len  = 0;
+
+#define SRP_SALT_LEN 16
+
+static esp_event_handler_instance_t s_inst_prov;
+static esp_event_handler_instance_t s_inst_wifi;
+static esp_event_handler_instance_t s_inst_ip;
+
+/* ── Internal helpers ───────────────────────────────────────────────────── */
+
+static void build_device_id(void)
+{
+    size_t len = sizeof(s_device_id);
+    if (nvs_factory_get_str("device_id", s_device_id, &len) == ESP_OK
+            && s_device_id[0] != '\0') {
+        ESP_LOGI(TAG, "Device ID loaded from factory NVS: %s", s_device_id);
+        return;
+    }
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(s_device_id, sizeof(s_device_id), "%s_%02X%02X%02X",
+             CONFIG_PILOT_BLE_DEVICE_NAME, mac[3], mac[4], mac[5]);
+    ESP_LOGI(TAG, "Device ID derived from MAC: %s", s_device_id);
+}
+
+static void free_srp_params(void)
+{
+    free(s_srp_salt);     s_srp_salt     = NULL;
+    free(s_srp_verifier); s_srp_verifier = NULL;
+    s_srp_ver_len = 0;
+}
+
+/* ── Event handler ──────────────────────────────────────────────────────── */
+
+static void event_handler(void *arg, esp_event_base_t base,
+                           int32_t id, void *data)
+{
+    /* IDF 6.0: event base is NETWORK_PROV_EVENT, types are NETWORK_PROV_*.
+     * Most function names changed from wifi_prov_mgr_* to network_prov_mgr_*
+     * with some exceptions documented in the migration guide. */
+    if (base == NETWORK_PROV_EVENT)
+    {
+      switch (id)
+      {
+      case NETWORK_PROV_START:
+        ESP_LOGI(TAG, "BLE provisioning started.");
+        break;
+      case NETWORK_PROV_WIFI_CRED_RECV: // ← javítva
+        ESP_LOGI(TAG, "Wi-Fi credentials received via BLE.");
+        break;
+      case NETWORK_PROV_WIFI_CRED_FAIL: {             // ← javítva
+        network_prov_wifi_sta_fail_reason_t *reason = // ← javítva
+            (network_prov_wifi_sta_fail_reason_t *) data;
+        ESP_LOGE(TAG,
+                 "Provisioning credential failure: %s",
+                 (*reason == NETWORK_PROV_WIFI_STA_AUTH_ERROR) // ← javítva
+                     ? "Auth error"
+                     : "AP not found");
+        network_prov_mgr_reset_wifi_sm_state_on_failure();
+        break;
+      }
+      case NETWORK_PROV_WIFI_CRED_SUCCESS: // ← javítva
+        ESP_LOGI(TAG, "Provisioning successful.");
+        break;
+      case NETWORK_PROV_END:
+        network_prov_mgr_deinit();
+        free_srp_params();
+        ESP_LOGI(TAG, "Provisioning ended; BLE stack released.");
+        break;
+      }
+    }
+    else if (base == WIFI_EVENT)
+    {
+      if (id == WIFI_EVENT_STA_START)
+      {
+        esp_wifi_connect();
+      }
+      else if (id == WIFI_EVENT_STA_DISCONNECTED)
+      {
+        s_connected = false;
+        xEventGroupClearBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+        ESP_LOGW(TAG, "Disconnected. Reconnecting...");
+        if (s_on_disconnect)
+          s_on_disconnect();
+        esp_wifi_connect();
+      }
+    }
+    else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP)
+    {
+      ip_event_got_ip_t *ev = (ip_event_got_ip_t *) data;
+      snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
+      s_connected = true;
+      xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+      ESP_LOGI(TAG, "IP acquired: %s", s_ip_str);
+      if (s_on_connect)
+        s_on_connect();
+    }
+}
+
+/* ── Public API ─────────────────────────────────────────────────────────── */
+
+esp_err_t wifi_manager_init(wifi_connected_cb_t on_connect,
+                            wifi_disconnected_cb_t on_disconnect)
+{
+    s_on_connect    = on_connect;
+    s_on_disconnect = on_disconnect;
+
+    s_wifi_eg = xEventGroupCreate();
+    if (!s_wifi_eg) return ESP_ERR_NO_MEM;
+
+    build_device_id();
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, event_handler, NULL, &s_inst_prov));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, event_handler, NULL, &s_inst_wifi));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, event_handler, NULL, &s_inst_ip));
+
+    /* IDF 6.0: network_prov_mgr_config_t replaces wifi_prov_mgr_config_t.
+     * scheme field: network_prov_scheme_ble replaces wifi_prov_scheme_ble. */
+    network_prov_mgr_config_t prov_cfg = {
+        .scheme               = network_prov_scheme_ble,
+        .scheme_event_handler = NETWORK_PROV_EVENT_HANDLER_NONE,
+    };
+    ESP_ERROR_CHECK(network_prov_mgr_init(prov_cfg));
+
+    bool provisioned = false;
+    /* IDF 6.0 rename: wifi_prov_mgr_is_provisioned
+     *              -> network_prov_mgr_is_wifi_provisioned */
+    ESP_ERROR_CHECK(network_prov_mgr_is_wifi_provisioned(&provisioned));
+
+    if (!provisioned) {
+        char pop[48] = {0};
+        size_t pop_len = sizeof(pop);
+        esp_err_t err = nvs_factory_get_str("device_password", pop, &pop_len);
+        if (err != ESP_OK || pop[0] == '\0') {
+            ESP_LOGW(TAG, "Factory device_password unavailable – using compile-time fallback.");
+            strncpy(pop, CONFIG_PILOT_FALLBACK_POP_CODE, sizeof(pop) - 1);
+        }
+
+        /* Derive SRP6a verifier: v = g^H(salt||H(username:password)) mod N
+         * username (I) = unique device ID; password (P) = device_password. */
+        err = esp_srp_gen_salt_verifier(s_device_id,    (int)strlen(s_device_id),
+                                        pop,             (int)strlen(pop),
+                                        &s_srp_salt,     SRP_SALT_LEN,
+                                        &s_srp_verifier, &s_srp_ver_len);
+        explicit_bzero(pop, sizeof(pop));
+
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "SRP6a generation failed: %s", esp_err_to_name(err));
+            return err;
+        }
+
+        /* IDF 6.0: network_prov_security2_params_t replaces
+         *          wifi_prov_security2_params_t. */
+        network_prov_security2_params_t sec2 = {
+            .salt         = s_srp_salt,
+            .salt_len     = SRP_SALT_LEN,
+            .verifier     = s_srp_verifier,
+            .verifier_len = (uint16_t)s_srp_ver_len,
+        };
+
+        ESP_LOGI(TAG, "Starting BLE provisioning (Security 2 / SRP6a) as '%s'",
+                 s_device_id);
+        /* IDF 6.0: NETWORK_PROV_SECURITY_2 replaces WIFI_PROV_SECURITY_2. */
+        ESP_ERROR_CHECK(network_prov_mgr_start_provisioning(
+            NETWORK_PROV_SECURITY_2, (const void *)&sec2,
+            s_device_id, NULL));
+
+    } else {
+        ESP_LOGI(TAG, "Already provisioned. Connecting to saved AP...");
+        network_prov_mgr_deinit();
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_ERROR_CHECK(esp_wifi_start());
+    }
+
+    return ESP_OK;
+}
+
+const char *wifi_manager_get_device_id(void)
+{
+    return s_device_id;
+}
+
+bool wifi_manager_is_connected(void)
+{
+    return s_connected;
+}
+
+esp_err_t wifi_manager_get_ip(char *buf, size_t len)
+{
+    if (!s_connected) return ESP_ERR_INVALID_STATE;
+    snprintf(buf, len, "%s", s_ip_str);
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_factory_reset(void)
+{
+    ESP_LOGW(TAG, "Factory reset: erasing provisioning data.");
+    /* IDF 6.0 rename: wifi_prov_mgr_reset_provisioning
+     *              -> network_prov_mgr_reset_wifi_provisioning */
+    network_prov_mgr_reset_wifi_provisioning();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+    return ESP_OK;
+}
+
+--- END OF FILE ---
+
+--- FILE: ./main/wifi_manager.h ---
+#pragma once
+
+#include "esp_err.h"
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** Called from the IP event task when a valid IP address is acquired. */
+typedef void (*wifi_connected_cb_t)(void);
+
+/** Called from the Wi-Fi event task on station disconnect. */
+typedef void (*wifi_disconnected_cb_t)(void);
+
+/**
+ * @brief Initialise Wi-Fi and start BLE provisioning (Security 2 / SRP6a)
+ *        if the device has not been provisioned yet.
+ *
+ *        If already provisioned, connects to the saved AP immediately.
+ *        Registers internal event handlers using the instance API.
+ *
+ * @param on_connect     Called when IP is obtained.  May be NULL.
+ * @param on_disconnect  Called on station disconnect.  May be NULL.
+ */
+esp_err_t wifi_manager_init(wifi_connected_cb_t on_connect,
+                            wifi_disconnected_cb_t on_disconnect);
+
+/**
+ * @brief Return the unique device ID string (BLE advertisement name and
+ *        SRP6a username).  Valid after wifi_manager_init() returns.
+ */
+const char *wifi_manager_get_device_id(void);
+
+/** @return true if the station currently holds a valid IP address. */
+bool wifi_manager_is_connected(void);
+
+/**
+ * @brief Copy the current IP address string into buf.
+ * @return ESP_ERR_INVALID_STATE if not connected.
+ */
+esp_err_t wifi_manager_get_ip(char *buf, size_t len);
+
+/**
+ * @brief Erase provisioning credentials and restart.
+ *        Safe to call from any task.
+ */
+esp_err_t wifi_manager_factory_reset(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END OF FILE ---
+
+--- FILE: ./sdkconfig.defaults ---
+# ── Partition table ─────────────────────────────────────────────────────────
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ── Flash size ───────────────────────────────────────────────────────────────
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# ── PSRAM – ESP32-S3-WROOM-1U-N8R8 (OPI / Octal PSRAM) ─────────────────────
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+
+# ── HTTPS server ─────────────────────────────────────────────────────────────
+CONFIG_ESP_HTTPS_SERVER_ENABLE=y
+
+# ── WebSocket support ────────────────────────────────────────────────────────
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# ESP-TLS
+CONFIG_ESP_TLS_SERVER_SESSION_TICKETS=y
+
+# ── TLS / mbedTLS – dynamic buffers for parallel connections ─────────────────
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# ── OTA ──────────────────────────────────────────────────────────────────────
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=n
+
+# ── Provisioning security (IDF 6.0: Security 0 and 1 disabled by default) ───
+# We use Security 2 (SRP6a) only – no need to re-enable the weaker versions.
+
+# ── LittleFS ─────────────────────────────────────────────────────────────────
+CONFIG_LITTLEFS_MAX_PARTITIONS=1
+CONFIG_LITTLEFS_PAGE_SIZE=256
+CONFIG_LITTLEFS_OBJ_NAME_LEN=64
+
+# ── IDF 6.0: Picolibc is the new default libc ────────────────────────────────
+# No explicit override needed – Picolibc is fully compatible with our codebase.
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+#
+# Bluetooth
+#
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+
+# ── Task Watchdog (TWDT) – production hardening ─────────────────────────────
+CONFIG_ESP_TASK_WDT_ENABLE=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+--- END OF FILE ---
+
+--- FILE: ./www/app.js ---
+'use strict';
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SSOT: token store
+ * All token access goes through these two functions.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+const Token = (() => {
+    let _token = localStorage.getItem('pilot_token') || '';
+    return {
+        get()        { return _token; },
+        set(t)       { _token = t; localStorage.setItem('pilot_token', t); },
+        authHeader() { return { 'Authorization': 'Bearer ' + _token }; },
+    };
+})();
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SSOT: format helpers
+ * Single place for all display-format conversions.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+const Fmt = {
+    bytes(b) {
+        if (b == null) return '—';
+        if (b < 1024)       return b + ' B';
+        if (b < 1048576)    return (b / 1024).toFixed(1) + ' KB';
+        return                     (b / 1048576).toFixed(2) + ' MB';
+    },
+    uptime(s) {
+        if (s == null) return '—';
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+        return `${h}h ${m}m ${sec}s`;
+    },
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SSOT: API client
+ * All HTTP calls go through apiFetch(). Auth header injected once here.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+const Api = {
+    async fetch(path, opts = {}) {
+        opts.headers = Object.assign(Token.authHeader(), opts.headers || {});
+        const r = await fetch(path, opts);
+        if (r.status === 401) { UI.setDot('err'); throw new Error('Unauthorized'); }
+        return r;
+    },
+    async getJSON(path)       { return (await this.fetch(path)).json(); },
+    async postJSON(path, body) {
+        return this.fetch(path, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify(body),
+        });
+    },
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SSOT: UI state helpers
+ * Centralised DOM update functions – no direct getElementById outside here.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+const UI = {
+    $: (id) => document.getElementById(id),
+    setDot(state) {
+        const d = this.$('conn-dot');
+        d.className = 'status-dot ' + (state || '');
+    },
+    setOtaStatus(msg, type) {
+        const el = this.$('ota-status');
+        el.textContent = msg;
+        el.className   = type;
+    },
+    setProgress(rx, total) {
+        const pct = total > 0 ? Math.round(rx / total * 100) : 0;
+        this.$('prog-fill').style.width  = pct + '%';
+        this.$('prog-bytes').textContent = Fmt.bytes(rx) + ' / ' + Fmt.bytes(total);
+        this.$('prog-pct').textContent   = pct + '%';
+        this.$('prog-wrap').classList.add('visible');
+    },
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Module: SystemPanel
+ * Single responsibility: fetch and render /api/v1/system.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+const SystemPanel = {
+    async refresh() {
+        try {
+            const d = await Api.getJSON('/api/v1/system');
+            UI.$('s-fw').textContent     = d.fw_version   || '—';
+            UI.$('s-idf').textContent    = d.idf_version  || '—';
+            UI.$('s-ip').textContent     = d.ip           || '—';
+            UI.$('s-rssi').textContent   = d.rssi_dbm != null ? d.rssi_dbm + ' dBm' : '—';
+            UI.$('s-uptime').textContent = Fmt.uptime(d.uptime_s);
+            UI.$('s-heap').textContent   = Fmt.bytes(d.free_heap);
+            UI.$('s-mheap').textContent  = Fmt.bytes(d.min_heap);
+            UI.$('s-psram').textContent  = Fmt.bytes(d.free_psram);
+            UI.$('s-lfs').textContent    = d.lfs_mounted
+                ? Fmt.bytes(d.lfs_used) + ' / ' + Fmt.bytes(d.lfs_total)
+                : 'Not mounted';
+            UI.setDot('ok');
+        } catch (_) { UI.setDot('err'); }
+    },
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Module: OtaPanel
+ * Single responsibility: OTA upload, rollback, and status display.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+const OtaPanel = {
+    _file: null,
+
+    init() {
+        const input = UI.$('fw-file');
+        const dz    = UI.$('drop-zone');
+
+        input.addEventListener('change', () => this._setFile(input.files[0]));
+
+        dz.addEventListener('dragover',  (e) => { e.preventDefault(); dz.classList.add('drag'); });
+        dz.addEventListener('dragleave', ()  => dz.classList.remove('drag'));
+        dz.addEventListener('drop', (e) => {
+            e.preventDefault(); dz.classList.remove('drag');
+            const f = e.dataTransfer.files[0];
+            if (f && f.name.endsWith('.bin')) {
+                const dt = new DataTransfer(); dt.items.add(f);
+                input.files = dt.files;
+                this._setFile(f);
+            }
+        });
+    },
+
+    _setFile(f) {
+        if (!f) return;
+        this._file = f;
+        UI.$('file-name').textContent = f.name + ' (' + Fmt.bytes(f.size) + ')';
+        UI.$('drop-zone').classList.add('has-file');
+        UI.$('btn-upload').disabled = false;
+    },
+
+    async loadStatus() {
+        try {
+            const d      = await Api.getJSON('/api/v1/ota/status');
+            const states = ['undefined','pending_verify','valid','invalid','aborted','new'];
+            UI.$('ota-meta').innerHTML =
+                `<span class="chip">v<span>${d.version || '?'}</span></span>` +
+                `<span class="chip">partition: <span>${d.partition || '?'}</span></span>` +
+                `<span class="chip">state: <span>${states[d.ota_state] || d.ota_state}</span></span>` +
+                `<span class="chip">built: <span>${d.date || '?'}</span></span>`;
+        } catch (_) {}
+    },
+
+    async upload() {
+        if (!this._file) return;
+        const btn = UI.$('btn-upload');
+        btn.disabled = true;
+        UI.setProgress(0, this._file.size);
+        UI.setOtaStatus('Uploading firmware…', 'info');
+        try {
+            const r = await Api.fetch('/api/v1/ota', {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/octet-stream',
+                           'Content-Length': this._file.size },
+                body:    this._file,
+                duplex:  'half',
+            });
+            if (r.ok) {
+                UI.setOtaStatus('Upload accepted. Device rebooting…', 'ok');
+                UI.setProgress(this._file.size, this._file.size);
+            } else {
+                UI.setOtaStatus('Error: ' + await r.text(), 'err');
+                btn.disabled = false;
+            }
+        } catch (e) {
+            UI.setOtaStatus('Network error: ' + e.message, 'err');
+            btn.disabled = false;
+        }
+    },
+
+    async rollback() {
+        if (!confirm('Roll back to the previous firmware and reboot?')) return;
+        try {
+            const r = await Api.fetch('/api/v1/ota/rollback', { method: 'POST' });
+            const d = await r.json();
+            UI.setOtaStatus(d.message || 'Rollback initiated.', r.ok ? 'ok' : 'err');
+        } catch (e) { UI.setOtaStatus('Rollback error: ' + e.message, 'err'); }
+    },
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Module: ConfigPanel
+ * Single responsibility: NVS config display and editing.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+const ConfigPanel = {
+    async refresh() {
+        UI.$('config-empty').textContent = 'Loading…';
+        try {
+            const data = await Api.getJSON('/api/v1/config');
+            this._render(data);
+        } catch (_) { UI.$('config-empty').textContent = 'Load failed.'; }
+    },
+
+    _render(data) {
+        const tbody = UI.$('config-body');
+        tbody.innerHTML = '';
+        const keys = Object.keys(data);
+        UI.$('config-empty').style.display = keys.length ? 'none' : 'block';
+        keys.forEach(k => {
+            const tr = document.createElement('tr');
+            tr.innerHTML =
+                `<td>${k}</td>` +
+                `<td><input type="text" value="${data[k]}" data-key="${k}" onchange="ConfigPanel._markDirty(this)"></td>` +
+                `<td><button class="config-save-btn" data-key="${k}" onclick="ConfigPanel._save(this)">Save</button></td>`;
+            tbody.appendChild(tr);
+        });
+    },
+
+    _markDirty(input) {
+        input.closest('tr').querySelector('.config-save-btn').style.display = 'inline-block';
+    },
+
+    async _save(btn) {
+        const key   = btn.dataset.key;
+        const raw   = btn.closest('tr').querySelector('input').value;
+        const value = isNaN(raw) ? raw : Number(raw);
+        const r     = await Api.postJSON('/api/v1/config', { key, value });
+        if (r.ok) btn.style.display = 'none';
+    },
+
+    async addEntry() {
+        const key = UI.$('new-key').value.trim();
+        const raw = UI.$('new-val').value.trim();
+        if (!key || !raw) return;
+        await Api.postJSON('/api/v1/config', { key, value: isNaN(raw) ? raw : Number(raw) });
+        UI.$('new-key').value = '';
+        UI.$('new-val').value = '';
+        this.refresh();
+    },
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Module: LogPanel
+ * Single responsibility: WebSocket log stream display.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+const LogPanel = {
+    _ws:       null,
+    _retry:    null,
+    _lines:    0,
+    MAX_LINES: 500,
+
+    connect() {
+        if (this._ws && this._ws.readyState < 2) this._ws.close();
+        if (this._retry) { clearTimeout(this._retry); this._retry = null; }
+
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const url   = `${proto}://${location.host}/ws/log?token=${encodeURIComponent(Token.get())}`;
+        this._ws    = new WebSocket(url);
+
+        const statusEl = UI.$('ws-status');
+        this._ws.onopen  = () => { statusEl.textContent = 'Connected';    statusEl.className = 'connected'; };
+        this._ws.onclose = () => { statusEl.textContent = 'Disconnected'; statusEl.className = ''; this._retry = setTimeout(() => this.connect(), 5000); };
+        this._ws.onerror = () => {};
+        this._ws.onmessage = (ev) => this._onMessage(ev.data);
+    },
+
+    _onMessage(raw) {
+        try {
+            const msg = JSON.parse(raw);
+            if      (msg.type === 'log')          this._appendLine(msg.msg);
+            else if (msg.type === 'ota_progress')  UI.setProgress(msg.bytes, msg.total);
+            else if (msg.type === 'ota_done')      UI.setOtaStatus('OTA complete – rebooting…', 'ok');
+            else if (msg.type === 'ota_rollback')  UI.setOtaStatus('Rollback – rebooting…', 'info');
+        } catch (_) { this._appendLine(raw); }
+    },
+
+    _appendLine(line) {
+        const con  = UI.$('log-console');
+        const span = document.createElement('span');
+        const lvl  = line.match(/\b([IWED])\s*\(/)?.[1] || 'I';
+        span.className   = 'l-' + lvl;
+        span.textContent = line + '\n';
+        con.appendChild(span);
+        if (++this._lines > this.MAX_LINES) { con.firstChild && con.removeChild(con.firstChild); this._lines--; }
+        if (UI.$('chk-scroll').checked) con.scrollTop = con.scrollHeight;
+    },
+
+    clear() { UI.$('log-console').innerHTML = ''; this._lines = 0; },
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Module: App
+ * Single responsibility: bootstrap and periodic refresh orchestration.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+const App = {
+    init() {
+        /* Restore token into the input field. */
+        if (Token.get()) UI.$('token-input').value = Token.get();
+
+        OtaPanel.init();
+
+        if (Token.get()) this._start();
+    },
+
+    connect() {
+        Token.set(UI.$('token-input').value.trim());
+        UI.setDot('ok');
+        this._start();
+    },
+
+    _start() {
+        /* Stagger API calls by 300 ms each to avoid opening 4+ parallel TLS
+         * sessions simultaneously, which exhausts the ESP32 mbedTLS heap.
+         * Each call reuses the same TLS session if keep-alive is active. */
+        SystemPanel.refresh();
+        setTimeout(() => OtaPanel.loadStatus(),  300);
+        setTimeout(() => ConfigPanel.refresh(),   600);
+        setTimeout(() => LogPanel.connect(),      900);
+        /* Stagger periodic refresh the same way. */
+        setInterval(() => SystemPanel.refresh(), 30000);
+    },
+};
+
+/* Expose callbacks used by inline HTML onclick attributes. */
+window.App          = App;
+window.OtaPanel     = OtaPanel;
+window.ConfigPanel  = ConfigPanel;
+window.LogPanel     = LogPanel;
+
+document.addEventListener('DOMContentLoaded', () => App.init());
+
+--- END OF FILE ---
+
+--- FILE: ./www/index.html ---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32-S3 Pilot Dashboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <h1><span class="status-dot" id="conn-dot"></span>ESP32-S3 Pilot Dashboard</h1>
+  <div class="header-right">
+    <div id="token-wrap">
+      <input type="password" id="token-input" placeholder="API token" autocomplete="off">
+      <button class="btn btn-ghost btn-sm" onclick="App.connect()">Connect</button>
+    </div>
+  </div>
+</header>
+
+<div class="main-grid">
+
+  <!-- System info -->
+  <div class="card">
+    <div class="card-title">
+      System info
+      <button class="btn btn-ghost btn-sm" onclick="SystemPanel.refresh()">Refresh</button>
+    </div>
+    <div class="info-grid">
+      <div class="info-item"><label>Firmware</label><span id="s-fw">—</span></div>
+      <div class="info-item"><label>IDF version</label><span id="s-idf">—</span></div>
+      <div class="info-item"><label>IP address</label><span class="mono" id="s-ip">—</span></div>
+      <div class="info-item"><label>Wi-Fi RSSI</label><span id="s-rssi">—</span></div>
+      <div class="info-item"><label>Uptime</label><span id="s-uptime">—</span></div>
+      <div class="info-item"><label>Free heap</label><span id="s-heap">—</span></div>
+      <div class="info-item"><label>Min heap</label><span id="s-mheap">—</span></div>
+      <div class="info-item"><label>Free PSRAM</label><span id="s-psram">—</span></div>
+      <div class="info-item"><label>LittleFS</label><span id="s-lfs">—</span></div>
+    </div>
+  </div>
+
+  <!-- OTA -->
+  <div class="card">
+    <div class="card-title">OTA firmware update</div>
+    <div class="ota-meta" id="ota-meta"></div>
+    <div id="drop-zone">
+      <input type="file" id="fw-file" accept=".bin">
+      <p>Drag &amp; drop <strong>.bin</strong> file here<br>or click to browse</p>
+      <div id="file-name"></div>
+    </div>
+    <div class="progress-wrap" id="prog-wrap">
+      <div class="progress-bar-bg"><div class="progress-bar-fill" id="prog-fill"></div></div>
+      <div class="progress-label"><span id="prog-bytes">0 B</span><span id="prog-pct">0%</span></div>
+    </div>
+    <div id="ota-status"></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn btn-primary" id="btn-upload" onclick="OtaPanel.upload()" disabled>Upload firmware</button>
+      <button class="btn btn-danger"  onclick="OtaPanel.rollback()">Rollback</button>
+    </div>
+  </div>
+
+  <!-- Config -->
+  <div class="card">
+    <div class="card-title">
+      Device configuration
+      <button class="btn btn-ghost btn-sm" onclick="ConfigPanel.refresh()">Refresh</button>
+    </div>
+    <div style="overflow-x:auto;">
+      <table id="config-table">
+        <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+        <tbody id="config-body"></tbody>
+      </table>
+      <div id="config-empty">Loading…</div>
+    </div>
+    <div class="new-key-row">
+      <input type="text" id="new-key" placeholder="key">
+      <input type="text" id="new-val" placeholder="value">
+      <button class="btn btn-primary btn-sm" onclick="ConfigPanel.addEntry()">Add</button>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="card span2">
+    <div class="card-title">
+      Live log stream
+      <div class="log-controls">
+        <span id="ws-status">Disconnected</span>
+        <button class="btn btn-ghost btn-sm" onclick="LogPanel.connect()">Connect WS</button>
+        <button class="btn btn-ghost btn-sm" onclick="LogPanel.clear()">Clear</button>
+        <label class="log-auto">
+          <input type="checkbox" id="chk-scroll" checked> Auto-scroll
+        </label>
+      </div>
+    </div>
+    <div id="log-console"></div>
+  </div>
+
+</div><!-- /main-grid -->
+
+<script src="/app.js"></script>
+</body>
+</html>
+
+--- END OF FILE ---
+
+--- FILE: ./www/style.css ---
+:root {
+  --bg:      #0f1117;
+  --surface: #1a1d27;
+  --card:    #20232f;
+  --border:  #2e3244;
+  --accent:  #4f8ef7;
+  --accent2: #6ee7b7;
+  --danger:  #f87171;
+  --warn:    #fbbf24;
+  --text:    #e2e8f0;
+  --muted:   #64748b;
+  --mono:    'JetBrains Mono', 'Fira Code', monospace;
+  --radius:  10px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 14px; display: flex; flex-direction: column; min-height: 100vh;
+}
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 24px; background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 100;
+}
+header h1 { font-size: 16px; font-weight: 600; letter-spacing: .02em; }
+.status-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--muted); display: inline-block;
+  margin-right: 8px; transition: background .4s;
+}
+.status-dot.ok  { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+.status-dot.err { background: var(--danger); }
+.header-right { display: flex; align-items: center; gap: 16px; }
+#token-wrap { display: flex; gap: 8px; align-items: center; }
+#token-wrap input {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 10px; color: var(--text);
+  font-size: 13px; width: 240px;
+}
+#token-wrap input:focus { outline: none; border-color: var(--accent); }
+.main-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 20px; padding: 24px; flex: 1;
+}
+@media (max-width: 900px) { .main-grid { grid-template-columns: 1fr; } }
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 20px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.card-title {
+  font-size: 12px; font-weight: 600; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.card.span2 { grid-column: span 2; }
+@media (max-width: 900px) { .card.span2 { grid-column: span 1; } }
+.info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 20px; }
+.info-item label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 2px; }
+.info-item span  { font-size: 15px; font-weight: 500; }
+.mono { font-family: var(--mono); font-size: 13px !important; }
+.progress-wrap { display: none; flex-direction: column; gap: 6px; }
+.progress-wrap.visible { display: flex; }
+.progress-bar-bg { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+.progress-bar-fill { height: 100%; background: var(--accent); border-radius: 4px; width: 0%; transition: width .3s ease; }
+.progress-label { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; }
+.btn {
+  padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500;
+  cursor: pointer; border: none; transition: opacity .15s, transform .1s;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:active { transform: scale(.97); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-danger  { background: var(--danger); color: #fff; }
+.btn-ghost   { background: var(--border); color: var(--text); }
+.btn-sm      { padding: 5px 10px; font-size: 12px; }
+#drop-zone {
+  border: 2px dashed var(--border); border-radius: var(--radius);
+  padding: 36px 20px; text-align: center; cursor: pointer;
+  transition: border-color .2s, background .2s; position: relative;
+}
+#drop-zone.drag     { border-color: var(--accent);  background: rgba(79,142,247,.06); }
+#drop-zone.has-file { border-color: var(--accent2); background: rgba(110,231,183,.06); }
+#drop-zone input[type=file] {
+  position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+}
+#drop-zone p   { color: var(--muted); font-size: 13px; pointer-events: none; }
+#file-name     { font-size: 12px; color: var(--accent2); margin-top: 4px; }
+#ota-status {
+  font-size: 13px; padding: 8px 12px; border-radius: 6px; display: none; margin-top: 4px;
+}
+#ota-status.ok   { background: rgba(110,231,183,.12); color: var(--accent2); display: block; }
+#ota-status.err  { background: rgba(248,113,113,.12); color: var(--danger);  display: block; }
+#ota-status.info { background: rgba(79,142,247,.12);  color: var(--accent);  display: block; }
+.ota-meta { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip {
+  font-size: 11px; padding: 3px 10px; border-radius: 20px;
+  background: var(--border); color: var(--muted); font-family: var(--mono);
+}
+.chip span { color: var(--text); }
+#config-table { width: 100%; border-collapse: collapse; }
+#config-table th, #config-table td {
+  text-align: left; padding: 8px 10px;
+  border-bottom: 1px solid var(--border); font-size: 13px;
+}
+#config-table th { font-size: 11px; color: var(--muted); font-weight: 600; }
+#config-table td input {
+  background: transparent; border: none; color: var(--text);
+  font-family: var(--mono); font-size: 13px; width: 100%; padding: 2px 4px; border-radius: 4px;
+}
+#config-table td input:focus { outline: none; background: var(--border); }
+#config-table tr:last-child td { border-bottom: none; }
+.config-save-btn {
+  font-size: 11px; padding: 3px 8px; border-radius: 4px;
+  background: var(--accent); color: #fff; border: none; cursor: pointer; display: none;
+}
+#config-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 20px 0; }
+.new-key-row { display: flex; gap: 8px; align-items: center; }
+.new-key-row input {
+  background: var(--border); border: none; border-radius: 6px;
+  padding: 6px 10px; color: var(--text); font-size: 13px; flex: 1;
+}
+.new-key-row input:focus { outline: 1px solid var(--accent); }
+#log-console {
+  font-family: var(--mono); font-size: 12px; line-height: 1.6;
+  background: #0b0d14; border-radius: 6px; padding: 12px 14px;
+  height: 340px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+}
+#log-console .l-I { color: #94a3b8; }
+#log-console .l-W { color: var(--warn); }
+#log-console .l-E { color: var(--danger); }
+#log-console .l-D { color: #475569; }
+.log-controls { display: flex; gap: 8px; align-items: center; }
+#ws-status { font-size: 11px; color: var(--muted); }
+#ws-status.connected { color: var(--accent2); }
+.log-auto { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-left: auto; }
+
+--- END OF FILE ---
