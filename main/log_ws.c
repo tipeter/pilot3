@@ -2,7 +2,7 @@
 #include "auth.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
-#include "esp_task_wdt.h"
+// #include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -74,7 +74,7 @@ static int log_ws_vprintf(const char *fmt, va_list args)
 
 static void log_ws_task(void *arg)
 {
-  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+  // ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
   ESP_LOGI(TAG,
            "log_ws_task started (stack high-water: %u bytes)",
@@ -83,7 +83,7 @@ static void log_ws_task(void *arg)
   ws_msg_t msg;
   while (1)
   {
-    esp_task_wdt_reset();
+    // esp_task_wdt_reset();
 
     if (xQueueReceive(s_msg_queue, &msg, portMAX_DELAY) != pdTRUE)
       continue;

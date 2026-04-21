@@ -8,7 +8,7 @@
 #include "esp_ota_ops.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
-#include "esp_task_wdt.h"
+//#include "esp_task_wdt.h"
 
 #include "sdkconfig.h"
 #include "nvs_config.h"
@@ -34,12 +34,12 @@ static void IRAM_ATTR reset_isr_handler(void *arg)
 
 static void reset_monitor_task(void *arg)
 {
-  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+  //  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
   uint64_t fall_ts;
   while (1)
   {
-    esp_task_wdt_reset();
+    // esp_task_wdt_reset();
 
     if (xQueueReceive(s_reset_q, &fall_ts, pdMS_TO_TICKS(5000)) != pdTRUE)
     {
@@ -132,29 +132,38 @@ static TaskHandle_t s_server_task_handle = NULL;
 static void web_server_task(void *arg)
 {
   /* Subscribe to TWDT once */
-  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+  // ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
   ESP_LOGI(TAG,
            "web_server_task (web_srv) started (stack high-water: %u bytes)",
            uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
 
   /* One immediate reset right after subscription */
-  esp_task_wdt_reset();
+  // esp_task_wdt_reset();
 
   while (1)
   {
-    esp_task_wdt_reset(); /* feed every loop – critical */
-
-    /* Wait max 5 seconds for Wi-Fi connected notification */
-    uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
-
-    if (notified)
-    {
-      ESP_LOGI(TAG, "Wi-Fi connected – starting HTTPS server...");
-      web_server_start();
-    }
-    /* else: still in provisioning or waiting → just continue feeding TWDT */
+    /* Block indefinitely until notified by on_wifi_connected(). */
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    ESP_LOGI(TAG,
+             "Starting web server (stack: %u bytes free)!",
+             uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
+    web_server_start();
   }
+  // while (1)
+  // {
+  // esp_task_wdt_reset(); /* feed every loop – critical */
+
+  /* Wait max 5 seconds for Wi-Fi connected notification */
+  // uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+
+  // if (notified)
+  // {
+  // ESP_LOGI(TAG, "Wi-Fi connected – starting HTTPS server...");
+  // web_server_start();
+  // }
+  /* else: still in provisioning or waiting → just continue feeding TWDT */
+  // }
 }
 
 /* ── Wi-Fi callbacks (called from sys_evt context – must be fast) ───────── */
@@ -177,11 +186,11 @@ static void on_wifi_disconnected(void)
 
 static void heap_monitor_task(void *pvParameters)
 {
-  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+  // ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
   while (1)
   {
-    esp_task_wdt_reset();
+    // esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(10000));
 
     ESP_LOGI("HEAP",
@@ -196,18 +205,18 @@ static void heap_monitor_task(void *pvParameters)
 
 void app_main(void)
 {
-#if CONFIG_ESP_TASK_WDT_INIT
-  esp_task_wdt_deinit();
-#endif // CONFIG_ESP_TASK_WDT_INIT
+  // #if CONFIG_ESP_TASK_WDT_INIT
+  //   esp_task_wdt_deinit();
+  // #endif // CONFIG_ESP_TASK_WDT_INIT
 
-  /* Initialise Task Watchdog (10s timeout, panic on trigger) */
-  esp_task_wdt_config_t twdt_config = {
-      .timeout_ms = 10000, /* 10 seconds – enough for WiFi/HTTPS/WS operations */
-      .trigger_panic = true, /* panic + reset on timeout (production default) */
-      .idle_core_mask = (1U << CONFIG_FREERTOS_NUMBER_OF_CORES) - 1,
-  };
-  ESP_ERROR_CHECK(esp_task_wdt_init(&twdt_config));
-  ESP_LOGI(TAG, "Task Watchdog Timer initialised (10s timeout, panic enabled)");
+  //   /* Initialise Task Watchdog (10s timeout, panic on trigger) */
+  //   esp_task_wdt_config_t twdt_config = {
+  //       .timeout_ms = 10000, /* 10 seconds – enough for WiFi/HTTPS/WS operations */
+  //       .trigger_panic = true, /* panic + reset on timeout (production default) */
+  //       .idle_core_mask = (1U << CONFIG_FREERTOS_NUMBER_OF_CORES) - 1,
+  //   };
+  //   ESP_ERROR_CHECK(esp_task_wdt_init(&twdt_config));
+  //   ESP_LOGI(TAG, "Task Watchdog Timer initialised (10s timeout, panic enabled)");
 
   /* ── 1. NVS flash init ─────────────────────────────────────────────── */
   esp_err_t err = nvs_flash_init();
