@@ -131,26 +131,29 @@ static TaskHandle_t s_server_task_handle = NULL;
 
 static void web_server_task(void *arg)
 {
-  /* Subscribe once to TWDT */
+  /* Subscribe to TWDT once */
   ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
   ESP_LOGI(TAG,
-           "web_server_task started (stack high-water: %u bytes)",
+           "web_server_task (web_srv) started (stack high-water: %u bytes)",
            uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
+
+  /* One immediate reset right after subscription */
+  esp_task_wdt_reset();
 
   while (1)
   {
-    /* 5 second timeout – guarantees watchdog feed even without Wi-Fi */
-    uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    esp_task_wdt_reset(); /* feed every loop – critical */
 
-    esp_task_wdt_reset(); /* feed every cycle – critical for TWDT */
+    /* Wait max 5 seconds for Wi-Fi connected notification */
+    uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
 
     if (notified)
     {
       ESP_LOGI(TAG, "Wi-Fi connected – starting HTTPS server...");
       web_server_start();
     }
-    /* else: still waiting for Wi-Fi → just keep feeding TWDT */
+    /* else: still in provisioning or waiting → just continue feeding TWDT */
   }
 }
 
@@ -193,7 +196,10 @@ static void heap_monitor_task(void *pvParameters)
 
 void app_main(void)
 {
-#if !CONFIG_ESP_TASK_WDT_INIT
+#if CONFIG_ESP_TASK_WDT_INIT
+  esp_task_wdt_deinit();
+#endif // CONFIG_ESP_TASK_WDT_INIT
+
   /* Initialise Task Watchdog (10s timeout, panic on trigger) */
   esp_task_wdt_config_t twdt_config = {
       .timeout_ms = 10000, /* 10 seconds – enough for WiFi/HTTPS/WS operations */
@@ -202,7 +208,6 @@ void app_main(void)
   };
   ESP_ERROR_CHECK(esp_task_wdt_init(&twdt_config));
   ESP_LOGI(TAG, "Task Watchdog Timer initialised (10s timeout, panic enabled)");
-#endif // CONFIG_ESP_TASK_WDT_INIT
 
   /* ── 1. NVS flash init ─────────────────────────────────────────────── */
   esp_err_t err = nvs_flash_init();
