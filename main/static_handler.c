@@ -88,22 +88,33 @@ static esp_err_t send_file(httpd_req_t *req, const char *vfs_path,
     make_etag(&st, etag, sizeof(etag));
     httpd_resp_set_hdr(req, "ETag", etag);
 
-    /* Cache strategy: HTML always revalidated; static assets cached 24 h.
-     * This reduces parallel TLS connections on repeated page loads because
-     * the browser reuses cached JS/CSS instead of opening new sessions. */
+    /* CAggressive immutable caching for web assets (Alpine.js + Pico.css + uPlot + fonts).
+     * 1 year + immutable = browser never re-validates on subsequent loads.
+     * This dramatically reduces parallel TLS sessions and PSRAM pressure. */
     const char *ext = file_ext(path);
-    bool is_static = ext && (
-        strcasecmp(ext, ".js")    == 0 ||
-        strcasecmp(ext, ".css")   == 0 ||
-        strcasecmp(ext, ".ico")   == 0 ||
-        strcasecmp(ext, ".png")   == 0 ||
-        strcasecmp(ext, ".jpg")   == 0 ||
-        strcasecmp(ext, ".woff2") == 0 ||
-        strcasecmp(ext, ".woff")  == 0 ||
-        strcasecmp(ext, ".ttf")   == 0
-    );
-    httpd_resp_set_hdr(req, "Cache-Control",
-                       is_static ? "public, max-age=86400" : "no-cache");
+    bool is_immutable_asset = ext
+                              && (strcasecmp(ext, ".js") == 0
+                                  || strcasecmp(ext, ".css") == 0
+                                  || strcasecmp(ext, ".png") == 0
+                                  || strcasecmp(ext, ".jpg") == 0
+                                  || strcasecmp(ext, ".svg") == 0
+                                  || strcasecmp(ext, ".woff2") == 0
+                                  || strcasecmp(ext, ".woff") == 0
+                                  || strcasecmp(ext, ".ttf") == 0
+                                  || strcasecmp(ext, ".ico") == 0);
+
+    if (is_immutable_asset)
+    {
+      httpd_resp_set_hdr(req,
+                         "Cache-Control",
+                         "public, max-age=31536000, immutable");
+    }
+    else
+    {
+      httpd_resp_set_hdr(req,
+                         "Cache-Control",
+                         "no-cache, no-store, must-revalidate");
+    }
 
     /* Stream file in PSRAM-backed chunks. */
     const size_t CHUNK = 4096;
@@ -169,7 +180,9 @@ static esp_err_t root_handler(httpd_req_t *req)
     /* Embedded fallback. */
     ESP_LOGI(TAG, "Serving embedded fallback web_ui.html.");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req,
+                       "Cache-Control",
+                       "no-cache, no-store, must-revalidate");
     httpd_resp_send(req,
                     (const char *)web_ui_html_start,
                     (ssize_t)(web_ui_html_end - web_ui_html_start));

@@ -89,6 +89,7 @@ bool auth_check_bearer(httpd_req_t *req)
         ESP_LOGW(TAG, "Missing Authorization header from %s", req->uri);
         httpd_resp_set_status(req, "401 Unauthorized");
         httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer realm=\"ESP32-S3 Pilot\"");
+        httpd_resp_set_type(req, "Content-Type: application/json");
         httpd_resp_sendstr(req, "{\"error\":\"Unauthorized\"}");
         return false;
     }

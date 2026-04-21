@@ -20,8 +20,8 @@ static const char *TAG = "OTA_HANDLER";
 #define OTA_MAX_BYTES   CONFIG_PILOT_OTA_MAX_SIZE_BYTES
 
 /* Shared atomic progress state (bytes received so far). */
-static uint32_t s_ota_bytes_received = 0;
-static uint32_t s_ota_total_bytes    = 0;
+static _Atomic uint32_t s_ota_bytes_received = 0;
+static _Atomic uint32_t s_ota_total_bytes = 0;
 
 /* ── Internal helpers ───────────────────────────────────────────────────── */
 
