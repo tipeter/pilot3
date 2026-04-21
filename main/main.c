@@ -131,25 +131,26 @@ static TaskHandle_t s_server_task_handle = NULL;
 
 static void web_server_task(void *arg)
 {
-  /* Subscribe this task to TWDT only once */
+  /* Subscribe once to TWDT */
   ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
   ESP_LOGI(TAG,
-           "web_server_task started (stack: %u bytes free)",
+           "web_server_task started (stack high-water: %u bytes)",
            uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
 
   while (1)
   {
-    /* 5 second timeout – enough to keep TWDT happy, but still responsive */
+    /* 5 second timeout – guarantees watchdog feed even without Wi-Fi */
     uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
 
-    esp_task_wdt_reset(); /* feed every cycle – critical! */
+    esp_task_wdt_reset(); /* feed every cycle – critical for TWDT */
 
     if (notified)
     {
       ESP_LOGI(TAG, "Wi-Fi connected – starting HTTPS server...");
       web_server_start();
     }
+    /* else: still waiting for Wi-Fi → just keep feeding TWDT */
   }
 }
 
@@ -197,7 +198,7 @@ void app_main(void)
   esp_task_wdt_config_t twdt_config = {
       .timeout_ms = 10000, /* 10 seconds – enough for WiFi/HTTPS/WS operations */
       .trigger_panic = true, /* panic + reset on timeout (production default) */
-      .idle_core_mask = (1 << CONFIG_FREERTOS_NUMBER_OF_CORES) - 1,
+      .idle_core_mask = (1U << CONFIG_FREERTOS_NUMBER_OF_CORES) - 1,
   };
   ESP_ERROR_CHECK(esp_task_wdt_init(&twdt_config));
   ESP_LOGI(TAG, "Task Watchdog Timer initialised (10s timeout, panic enabled)");
