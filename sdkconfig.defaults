@@ -19,6 +19,9 @@ CONFIG_ESP_HTTPS_SERVER_ENABLE=y
 # ── WebSocket support ────────────────────────────────────────────────────────
 CONFIG_HTTPD_WS_SUPPORT=y
 
+# ESP-TLS
+CONFIG_ESP_TLS_SERVER_SESSION_TICKETS=y
+
 # ── TLS / mbedTLS – dynamic buffers for parallel connections ─────────────────
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
@@ -40,3 +43,10 @@ CONFIG_LITTLEFS_OBJ_NAME_LEN=64
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+#
+# Bluetooth
+#
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
