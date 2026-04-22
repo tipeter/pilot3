@@ -25,6 +25,7 @@ find . -type f \
        -o -name "CMakeLists.txt" -o -name "sdkconfig.defaults" \
        -o -name "*.html" -o -name "*.css" -o -name "*.js" -o -name "*.json" \) \
     -not -path "*/build/*" \
+    -not -path "*/bld/*" \
     -not -path "*/.git/*" \
     -not -path "*/managed_components/*" | sort | while read -r file; do
     

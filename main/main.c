@@ -1,4 +1,3 @@
-#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -8,7 +7,8 @@
 #include "esp_ota_ops.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
-//#include "esp_task_wdt.h"
+
+#include "mdns_mgr.h"
 
 #include "sdkconfig.h"
 #include "nvs_config.h"
@@ -18,6 +18,9 @@
 #include "log_ws.h"
 
 static const char *TAG = "MAIN";
+
+extern const uint8_t server_cert_pem_start[] asm("_binary_server_crt_start");
+extern const uint8_t server_cert_pem_end[] asm("_binary_server_crt_end");
 
 /* ── GPIO ISR reset ─────────────────────────────────────────────────────── */
 
@@ -131,39 +134,27 @@ static TaskHandle_t s_server_task_handle = NULL;
 
 static void web_server_task(void *arg)
 {
-  /* Subscribe to TWDT once */
-  // ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
-
   ESP_LOGI(TAG,
            "web_server_task (web_srv) started (stack high-water: %u bytes)",
            uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
-
-  /* One immediate reset right after subscription */
-  // esp_task_wdt_reset();
 
   while (1)
   {
     /* Block indefinitely until notified by on_wifi_connected(). */
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    mdns_mgr_start();
+
     ESP_LOGI(TAG,
              "Starting web server (stack: %u bytes free)!",
              uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
-    web_server_start();
+
+    /* Robust retry loop to prevent silent server death on transient failure */
+    while (web_server_start() != ESP_OK)
+    {
+      ESP_LOGE(TAG, "Failed to start HTTPS server. Retrying in 5 seconds...");
+      vTaskDelay(pdMS_TO_TICKS(5000));
+    }
   }
-  // while (1)
-  // {
-  // esp_task_wdt_reset(); /* feed every loop – critical */
-
-  /* Wait max 5 seconds for Wi-Fi connected notification */
-  // uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
-
-  // if (notified)
-  // {
-  // ESP_LOGI(TAG, "Wi-Fi connected – starting HTTPS server...");
-  // web_server_start();
-  // }
-  /* else: still in provisioning or waiting → just continue feeding TWDT */
-  // }
 }
 
 /* ── Wi-Fi callbacks (called from sys_evt context – must be fast) ───────── */

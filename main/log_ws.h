@@ -29,6 +29,24 @@ esp_err_t log_ws_init(void);
 esp_err_t log_ws_register(httpd_handle_t server);
 
 /**
+ * @brief Socket close callback – MUST be wired into httpd_config_t.
+ *
+ *        In web_server.c, before starting the server:
+ * @code
+ *        httpd_ssl_config_t cfg = HTTPD_SSL_CONFIG_DEFAULT();
+ *        cfg.httpd.close_fn = log_ws_on_close;
+ * @endcode
+ *
+ *        Without this, clients that disconnect without sending a WebSocket
+ *        CLOSE frame (e.g. browser tab closed, network loss) leave stale
+ *        file descriptors in the client table, causing silent message loss.
+ *
+ * @param hd  Server handle (unused, required by httpd_config_t.close_fn signature).
+ * @param fd  File descriptor of the closing socket.
+ */
+void log_ws_on_close(httpd_handle_t hd, int fd);
+
+/**
  * @brief Enqueue an arbitrary JSON-formatted message for broadcast.
  *
  *        Can be called from any task (including the OTA handler) to
